@@ -1,7 +1,7 @@
 {
   "name": "@agiterra/wallet-claude-code",
-  "version": "0.1.0",
-  "description": "Wallet plugin for Claude Code — MCP tools for vault management, wallet subscription, and per-request signing decisions. Channel handler for wallet.sign.request.",
+  "version": "0.2.0",
+  "description": "Wallet plugin for Claude Code — MCP tools that publish JWT-signed wallet.sign.response messages to the wallet-vault Wire integration (approve / refuse / reject_with_error).",
   "license": "MIT",
   "type": "module",
   "bin": "./server.ts",
@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.1.0",
+    "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
