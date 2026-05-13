@@ -1,0 +1,15 @@
+{
+  "name": "wallet",
+  "description": "Agent wallet plugin for Claude Code — subscribe to wallet sign requests, decide per-request (approve / refuse / override / reject with error), manage the vault.",
+  "version": "0.1.0",
+  "keywords": [
+    "wallet",
+    "ethereum",
+    "eip1193",
+    "agent",
+    "mcp",
+    "channel"
+  ],
+  "postInstall": "bun install --frozen-lockfile",
+  "postUpdate": "bun install --frozen-lockfile"
+}
