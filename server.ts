@@ -2,33 +2,29 @@
 /**
  * @agiterra/wallet-claude-code — CC plugin server.
  *
- * Stdio MCP server. Exposes wallet decision tools (approve / refuse /
- * reject_with_error) that publish JWT-signed wallet.sign.response
- * messages directed at the wallet-vault Wire integration.
+ * Stdio MCP server. Two surfaces:
+ *
+ *   1. Sign-decision tools (v0.2.0): wallet_approve / wallet_refuse /
+ *      wallet_reject_with_error — JWT-signed publish of wallet.sign.response
+ *      directed at the wallet-vault Wire integration.
+ *
+ *   2. Vault management tools (v0.3.0): wallet_list / wallet_use /
+ *      wallet_grant / wallet_revoke / wallet_set_access_mode — read
+ *      and (operator-only for grant/revoke/mode) edit the wallet
+ *      directory stored in Wire's plugin_settings (namespace="wallet-vault",
+ *      key="wallets"). wallet_use publishes a tab-claim so subsequent
+ *      sign requests originating in that browser tab route to the
+ *      calling agent.
  *
  * Identity: this MCP server runs as the current Claude Code agent
- * (e.g. fondant) — it uses AGENT_ID + AGENT_PRIVATE_KEY + WIRE_URL from
- * the environment (set by ~/.wire/cc-launch.sh). No separate identity.
+ * (AGENT_ID + AGENT_PRIVATE_KEY + WIRE_URL from env, set by
+ * ~/.wire/cc-launch.sh). Operator-gated tools additionally require
+ * WIRE_DASHBOARD_TOKEN in env.
  *
- * Incoming wallet.sign.request events are surfaced to the agent's
- * conversation by the wire plugin's existing channel-notification path
- * (see `<channel topic="wallet.sign.request" ...>` system reminders).
- * This plugin does NOT open its own SSE connection — it just provides
- * the ergonomic outbound surface so the agent can decide via tool calls
- * instead of hand-crafting JWT-signed HTTP requests.
- *
- * v0.2.0:
- *   - wallet_approve(request_id)
- *   - wallet_refuse(request_id, reason?)
- *   - wallet_reject_with_error(request_id, code, message, data?)
- *
- * v0.3+ (deferred):
- *   - wallet_subscribe / wallet_pending_requests / wallet_get_request —
- *     reintroduced once the plugin owns a SSE connection or queries
- *     Wire's /messages endpoint for state.
- *   - Vault management: wallet_create / wallet_list / wallet_use /
- *     wallet_import — round-trip via wallet.vault.* topics to the
- *     extension.
+ * Deferred to v0.3.x: wallet_create / wallet_rename — these need a
+ * round-trip channel handler in the extension that publishes back the
+ * new wallet's address. The MCP server doesn't own its own SSE
+ * subscription yet, so the tool can't easily await the response.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -37,44 +33,63 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { WALLET_SIGN_RESPONSE } from "@agiterra/wallet-tools";
+import {
+  WALLET_SIGN_RESPONSE,
+  WALLET_VAULT_TAB_CLAIM,
+} from "@agiterra/wallet-tools";
+import type {
+  WalletAccessMode,
+  WalletDirectory,
+  WalletMeta,
+} from "@agiterra/wallet-tools";
 import { createAuthJwt, importKeyPair } from "@agiterra/wire-tools/crypto";
 
 const WALLET_VAULT_DEST = "wallet-vault";
+const WALLET_VAULT_NAMESPACE = "wallet-vault";
+const WALLETS_KEY = "wallets";
 
-// ----- Wire publish helper -----
+// ----- Env helpers -----
 
-interface SignResponseApprove { request_id: string; action: "approve" }
-interface SignResponseRefuse  { request_id: string; action: "refuse"; reason?: string }
-interface SignResponseReject  { request_id: string; action: "reject_with_error"; code: number; message: string; data?: unknown }
-type SignResponse = SignResponseApprove | SignResponseRefuse | SignResponseReject;
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} env var not set`);
+  return v;
+}
 
 let cachedPrivateKey: CryptoKey | null = null;
 
 async function getPrivateKey(): Promise<CryptoKey> {
   if (cachedPrivateKey) return cachedPrivateKey;
-  const b64 = process.env.AGENT_PRIVATE_KEY;
-  if (!b64) throw new Error("AGENT_PRIVATE_KEY env var not set");
-  const { privateKey } = await importKeyPair(b64);
+  const { privateKey } = await importKeyPair(requireEnv("AGENT_PRIVATE_KEY"));
   cachedPrivateKey = privateKey;
   return privateKey;
 }
 
-async function publishSignResponse(payload: SignResponse): Promise<{ seq: number }> {
-  const url = process.env.WIRE_URL;
-  const agentId = process.env.AGENT_ID;
-  if (!url) throw new Error("WIRE_URL env var not set");
-  if (!agentId) throw new Error("AGENT_ID env var not set");
+function operatorToken(): string {
+  const t = process.env.WIRE_DASHBOARD_TOKEN;
+  if (!t) {
+    throw new Error(
+      "WIRE_DASHBOARD_TOKEN env var not set — this tool requires operator credentials. " +
+      "Add WIRE_DASHBOARD_TOKEN to your shell environment to enable operator-gated wallet management tools.",
+    );
+  }
+  return t;
+}
+
+// ----- Wire publish helpers -----
+
+async function jwtHeaders(body: string): Promise<Record<string, string>> {
   const privateKey = await getPrivateKey();
+  const token = await createAuthJwt(privateKey, requireEnv("AGENT_ID"), body);
+  return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+}
+
+async function publishDirected(topic: string, payload: unknown): Promise<{ seq: number }> {
+  const url = requireEnv("WIRE_URL").replace(/\/$/, "");
   const body = JSON.stringify(payload);
-  const token = await createAuthJwt(privateKey, agentId, body);
-  const endpoint = `${url}/webhooks/${WALLET_VAULT_DEST}/${WALLET_SIGN_RESPONSE}`;
-  const res = await fetch(endpoint, {
+  const res = await fetch(`${url}/webhooks/${WALLET_VAULT_DEST}/${topic}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
+    headers: await jwtHeaders(body),
     body,
   });
   if (!res.ok) {
@@ -83,15 +98,82 @@ async function publishSignResponse(payload: SignResponse): Promise<{ seq: number
   return (await res.json()) as { seq: number };
 }
 
+// ----- plugin_settings read / write -----
+
+async function readDirectory(): Promise<WalletDirectory> {
+  const url = requireEnv("WIRE_URL").replace(/\/$/, "");
+  const res = await fetch(`${url}/plugin_settings/${WALLET_VAULT_NAMESPACE}/${WALLETS_KEY}`);
+  if (res.status === 404) return {};
+  if (!res.ok) {
+    throw new Error(`plugin_settings GET failed (${res.status}): ${await res.text().catch(() => "")}`);
+  }
+  const body = (await res.json()) as { value?: WalletDirectory };
+  return body.value ?? {};
+}
+
+async function writeDirectoryAsOperator(directory: WalletDirectory): Promise<void> {
+  const url = requireEnv("WIRE_URL").replace(/\/$/, "");
+  const token = operatorToken();
+  const body = JSON.stringify({ value: directory });
+  const res = await fetch(`${url}/plugin_settings/${WALLET_VAULT_NAMESPACE}/${WALLETS_KEY}?token=${encodeURIComponent(token)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  if (!res.ok) {
+    throw new Error(`plugin_settings PUT failed (${res.status}): ${await res.text().catch(() => "")}`);
+  }
+}
+
+// ----- Access helpers -----
+
+function callerAccessibleWallets(dir: WalletDirectory, callerAgentId: string): WalletDirectory {
+  const out: WalletDirectory = {};
+  for (const addr of Object.keys(dir)) {
+    const meta = dir[addr]!;
+    if (meta.access.mode === "all" || meta.access.agents.includes(callerAgentId)) {
+      out[addr] = meta;
+    }
+  }
+  return out;
+}
+
+function findWalletByNameOrAddress(
+  dir: WalletDirectory,
+  nameOrAddress: string,
+): { address: string; meta: WalletMeta } | null {
+  const lower = nameOrAddress.toLowerCase();
+  if (dir[lower]) return { address: lower, meta: dir[lower] };
+  // Fuzzy name match: exact (case-insensitive) on name or operator_name.
+  for (const addr of Object.keys(dir)) {
+    const meta = dir[addr]!;
+    if (meta.name.toLowerCase() === lower) return { address: addr, meta };
+    if (meta.operator_name && meta.operator_name.toLowerCase() === lower) return { address: addr, meta };
+  }
+  return null;
+}
+
+// ----- Sign-response publish (kept from v0.2.0) -----
+
+interface SignResponseApprove { request_id: string; action: "approve" }
+interface SignResponseRefuse  { request_id: string; action: "refuse"; reason?: string }
+interface SignResponseReject  { request_id: string; action: "reject_with_error"; code: number; message: string; data?: unknown }
+type SignResponse = SignResponseApprove | SignResponseRefuse | SignResponseReject;
+
+async function publishSignResponse(payload: SignResponse): Promise<{ seq: number }> {
+  return publishDirected(WALLET_SIGN_RESPONSE, payload);
+}
+
 // ----- MCP server -----
 
 const server = new Server(
-  { name: "wallet", version: "0.2.0" },
+  { name: "wallet", version: "0.3.0" },
   { capabilities: { tools: {} } },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    // ---- Sign-decision tools (v0.2 surface) ----
     {
       name: "wallet_approve",
       description:
@@ -99,10 +181,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          request_id: {
-            type: "string",
-            description: "request_id from the incoming wallet.sign.request channel event.",
-          },
+          request_id: { type: "string", description: "request_id from the incoming wallet.sign.request channel event." },
         },
         required: ["request_id"],
       },
@@ -110,15 +189,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "wallet_refuse",
       description:
-        "Refuse a pending wallet.sign.request. The dApp receives a standard EIP-1193 4001 \"User rejected the request.\" error. The reason (optional) is recorded in the response's data field for audit but is not surfaced to the dApp.",
+        "Refuse a pending wallet.sign.request. The dApp receives a standard EIP-1193 4001 \"User rejected the request.\" error. Optional reason rides in data for audit; dApp sees only the 4001 sentinel.",
       inputSchema: {
         type: "object",
         properties: {
           request_id: { type: "string" },
-          reason: {
-            type: "string",
-            description: "Optional audit reason. Stored in data.reason; dApp sees only the 4001 sentinel.",
-          },
+          reason: { type: "string" },
         },
         required: ["request_id"],
       },
@@ -126,18 +202,75 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "wallet_reject_with_error",
       description:
-        "Reject a pending wallet.sign.request with a custom JSON-RPC error code + message. Use this to test dApp handling of non-standard wallet errors (e.g. -32603 internal, -32000 server error).",
+        "Reject a pending wallet.sign.request with a custom JSON-RPC error code + message. Useful for testing dApp handling of non-standard wallet errors.",
       inputSchema: {
         type: "object",
         properties: {
           request_id: { type: "string" },
-          code: { type: "number", description: "JSON-RPC error code (e.g. -32603)." },
-          message: { type: "string", description: "JSON-RPC error message." },
-          data: {
-            description: "Optional structured data passed back in the error's data field.",
-          },
+          code: { type: "number" },
+          message: { type: "string" },
+          data: {},
         },
         required: ["request_id", "code", "message"],
+      },
+    },
+    // ---- Vault tools (v0.3) ----
+    {
+      name: "wallet_list",
+      description:
+        "List the wallets this agent has access to. Returns name, address, chain_id, creator, and access mode for each. Wallets where the caller isn't in the access list (and the mode isn't 'all') are omitted.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "wallet_use",
+      description:
+        "Bind a wallet to a browser tab. Subsequent EIP-1193 sign requests originating in that tab will be routed to the calling agent for approval. The agent must have access to the wallet (be in its access list, or the wallet must be mode:'all'). Pass `tab_id` from the tool you used to open the tab (e.g. Chrome MCP tabs_create_mcp). The wallet may be referenced by name (case-insensitive) or 0x-address.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tab_id: { type: "string", description: "Browser tab identifier (e.g. Chrome MCP tabId stringified)." },
+          wallet: { type: "string", description: "Wallet name or 0x-address." },
+        },
+        required: ["tab_id", "wallet"],
+      },
+    },
+    {
+      name: "wallet_grant",
+      description:
+        "OPERATOR ONLY. Grant an agent access to a wallet. Adds the agent to the wallet's access list. If the wallet was mode:'creator-only', it switches to mode:'specific'. Requires WIRE_DASHBOARD_TOKEN in env.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          wallet: { type: "string", description: "Wallet name or address." },
+          agent_id: { type: "string", description: "Agent to grant access to." },
+        },
+        required: ["wallet", "agent_id"],
+      },
+    },
+    {
+      name: "wallet_revoke",
+      description:
+        "OPERATOR ONLY. Revoke an agent's access to a wallet. Requires WIRE_DASHBOARD_TOKEN in env.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          wallet: { type: "string" },
+          agent_id: { type: "string" },
+        },
+        required: ["wallet", "agent_id"],
+      },
+    },
+    {
+      name: "wallet_set_access_mode",
+      description:
+        "OPERATOR ONLY. Change a wallet's access mode. 'creator-only' = only the creator agent; 'specific' = only listed agents (use wallet_grant/revoke to manage the list); 'all' = any registered Wire agent. Requires WIRE_DASHBOARD_TOKEN in env.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          wallet: { type: "string" },
+          mode: { type: "string", enum: ["creator-only", "specific", "all"] },
+        },
+        required: ["wallet", "mode"],
       },
     },
   ],
@@ -146,15 +279,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const name = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+  const callerAgentId = requireEnv("AGENT_ID");
 
   switch (name) {
+    // ---- Sign decisions ----
     case "wallet_approve": {
       const rid = String(args.request_id ?? "").trim();
       if (!rid) throw new Error("request_id required");
       const { seq } = await publishSignResponse({ request_id: rid, action: "approve" });
-      return {
-        content: [{ type: "text", text: `Approved ${rid} (Wire seq ${seq}).` }],
-      };
+      return { content: [{ type: "text", text: `Approved ${rid} (Wire seq ${seq}).` }] };
     }
     case "wallet_refuse": {
       const rid = String(args.request_id ?? "").trim();
@@ -165,9 +298,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         action: "refuse",
         ...(reason ? { reason } : {}),
       });
-      return {
-        content: [{ type: "text", text: `Refused ${rid} (Wire seq ${seq})${reason ? ` — reason: ${reason}` : ""}.` }],
-      };
+      return { content: [{ type: "text", text: `Refused ${rid} (Wire seq ${seq})${reason ? ` — reason: ${reason}` : ""}.` }] };
     }
     case "wallet_reject_with_error": {
       const rid = String(args.request_id ?? "").trim();
@@ -176,18 +307,100 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (!Number.isFinite(code)) throw new Error("code must be a number");
       const message = String(args.message ?? "");
       if (!message) throw new Error("message required");
-      const data = args.data;
       const { seq } = await publishSignResponse({
         request_id: rid,
         action: "reject_with_error",
         code,
         message,
-        ...(data !== undefined ? { data } : {}),
+        ...(args.data !== undefined ? { data: args.data } : {}),
       });
+      return { content: [{ type: "text", text: `Rejected ${rid} with code ${code} (Wire seq ${seq}): ${message}` }] };
+    }
+
+    // ---- Vault listing / binding ----
+    case "wallet_list": {
+      const dir = await readDirectory();
+      const accessible = callerAccessibleWallets(dir, callerAgentId);
+      const rows = Object.entries(accessible).map(([address, meta]) => ({
+        address,
+        name: meta.operator_name ?? meta.name,
+        chain_id: meta.chain_id,
+        creator: meta.creator,
+        access_mode: meta.access.mode,
+      }));
       return {
-        content: [{ type: "text", text: `Rejected ${rid} with code ${code} (Wire seq ${seq}): ${message}` }],
+        content: [{
+          type: "text",
+          text: rows.length === 0
+            ? `(no wallets — ${callerAgentId} isn't in any access list and no wallets are mode:'all'.)`
+            : JSON.stringify(rows, null, 2),
+        }],
       };
     }
+    case "wallet_use": {
+      const tabId = String(args.tab_id ?? "").trim();
+      if (!tabId) throw new Error("tab_id required");
+      const walletQuery = String(args.wallet ?? "").trim();
+      if (!walletQuery) throw new Error("wallet (name or address) required");
+
+      const dir = await readDirectory();
+      const found = findWalletByNameOrAddress(dir, walletQuery);
+      if (!found) throw new Error(`no wallet matches '${walletQuery}'`);
+      if (found.meta.access.mode !== "all" && !found.meta.access.agents.includes(callerAgentId)) {
+        throw new Error(`agent ${callerAgentId} has no access to wallet ${found.address} (${found.meta.name}). Ask the operator to grant access via wallet_grant.`);
+      }
+
+      const { seq } = await publishDirected(WALLET_VAULT_TAB_CLAIM, {
+        tab_id: tabId,
+        wallet_address: found.address,
+      });
+      return {
+        content: [{
+          type: "text",
+          text: `Bound tab ${tabId} to wallet ${found.address} (${found.meta.name}). Wire seq ${seq}. Subsequent sign requests in this tab will route to ${callerAgentId}.`,
+        }],
+      };
+    }
+
+    // ---- Operator-gated permission edits ----
+    case "wallet_grant":
+    case "wallet_revoke":
+    case "wallet_set_access_mode": {
+      const walletQuery = String(args.wallet ?? "").trim();
+      if (!walletQuery) throw new Error("wallet (name or address) required");
+      const dir = await readDirectory();
+      const found = findWalletByNameOrAddress(dir, walletQuery);
+      if (!found) throw new Error(`no wallet matches '${walletQuery}'`);
+
+      const meta = { ...found.meta, access: { ...found.meta.access, agents: [...found.meta.access.agents] } };
+
+      if (name === "wallet_grant") {
+        const grantee = String(args.agent_id ?? "").trim();
+        if (!grantee) throw new Error("agent_id required");
+        if (meta.access.mode === "creator-only") meta.access.mode = "specific";
+        if (!meta.access.agents.includes(grantee)) meta.access.agents.push(grantee);
+      } else if (name === "wallet_revoke") {
+        const grantee = String(args.agent_id ?? "").trim();
+        if (!grantee) throw new Error("agent_id required");
+        meta.access.agents = meta.access.agents.filter((a) => a !== grantee);
+      } else {
+        const mode = String(args.mode ?? "") as WalletAccessMode;
+        if (mode !== "creator-only" && mode !== "specific" && mode !== "all") {
+          throw new Error(`invalid mode '${mode}'`);
+        }
+        meta.access.mode = mode;
+      }
+
+      const next: WalletDirectory = { ...dir, [found.address]: meta };
+      await writeDirectoryAsOperator(next);
+      return {
+        content: [{
+          type: "text",
+          text: `Updated ${found.address} (${meta.name}). New access: mode=${meta.access.mode}, agents=[${meta.access.agents.join(", ")}].`,
+        }],
+      };
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -198,7 +411,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[wallet] MCP server connected (v0.2.0)");
+  console.error("[wallet] MCP server connected (v0.3.0)");
 }
 
 main().catch((e) => {

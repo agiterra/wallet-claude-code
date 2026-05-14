@@ -1,7 +1,7 @@
 {
   "name": "@agiterra/wallet-claude-code",
-  "version": "0.2.0",
-  "description": "Wallet plugin for Claude Code — MCP tools that publish JWT-signed wallet.sign.response messages to the wallet-vault Wire integration (approve / refuse / reject_with_error).",
+  "version": "0.3.0",
+  "description": "Wallet plugin for Claude Code — sign-decision tools (approve / refuse / reject_with_error) + vault management (wallet_list / wallet_use + operator-gated grant / revoke / set_access_mode). Reads + edits wallet directory via Wire's plugin_settings.",
   "license": "MIT",
   "type": "module",
   "bin": "./server.ts",
@@ -9,7 +9,7 @@
     "start": "bun install --no-summary && bun server.ts"
   },
   "dependencies": {
-    "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.1.0",
+    "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.2.0",
     "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },

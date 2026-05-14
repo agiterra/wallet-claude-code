@@ -5,7 +5,7 @@
     "": {
       "name": "@agiterra/wallet-claude-code",
       "dependencies": {
-        "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.1.0",
+        "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.2.0",
         "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5",
         "@modelcontextprotocol/sdk": "^1.0.0",
       },
@@ -15,7 +15,7 @@
     },
   },
   "packages": {
-    "@agiterra/wallet-tools": ["@agiterra/wallet-tools@github:agiterra/wallet-tools#3cadba0", { "dependencies": { "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5", "@noble/curves": "^1.6.0", "@noble/hashes": "^1.5.0" } }, "agiterra-wallet-tools-3cadba0", "sha512-4B+yd+Yous4NvTFc2C5C2S+3VSmrpRjns5PutA5hSo5o06SQklixW9YaKHqRbJF/jWVmfA5YVnSir2vXZdMcjQ=="],
+    "@agiterra/wallet-tools": ["@agiterra/wallet-tools@github:agiterra/wallet-tools#5d85319", { "dependencies": { "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5", "@noble/curves": "^1.6.0", "@noble/hashes": "^1.5.0" } }, "agiterra-wallet-tools-5d85319", "sha512-Gc5n0IOvVtXME2g+npYRPf8o/Ob8teE6WhwZdWiq9ksf4M8t9MfdjZms7Vf2vkEQDgt0cMDoHO33MT+tYd57/Q=="],
 
     "@agiterra/wire-tools": ["@agiterra/wire-tools@github:agiterra/wire-tools#1f5ff65", { "dependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "pino": "^10.3.1" } }, "agiterra-wire-tools-1f5ff65", "sha512-0bLptUllC3Zj5YX+RzXSRvRz8IdFSJpjGVaurAxvCrUJ2csinqevMqR7Zej8IjBzTLBirZYtCIxGih2DKXPbcw=="],
 
