@@ -88,15 +88,34 @@ async function jwtHeaders(body: string): Promise<Record<string, string>> {
 async function publishDirected(topic: string, payload: unknown): Promise<{ seq: number }> {
   const url = requireEnv("WIRE_URL").replace(/\/$/, "");
   const body = JSON.stringify(payload);
-  const res = await fetch(`${url}/webhooks/${WALLET_VAULT_DEST}/${topic}`, {
-    method: "POST",
-    headers: await jwtHeaders(body),
-    body,
-  });
-  if (!res.ok) {
-    throw new Error(`Wire publish failed (${res.status}): ${await res.text().catch(() => "")}`);
+  const endpoint = `${url}/webhooks/${WALLET_VAULT_DEST}/${topic}`;
+
+  // Retry transient failures (ngrok blips, brief 5xx, JWT body-hash mismatch
+  // on clock skew). Total wait ≤ ~7s before giving up. Real auth errors
+  // (401/403) and validation errors (4xx not 408/429) fail fast — they
+  // won't get better with retry.
+  let lastError = "";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) {
+      const wait = 300 * Math.pow(2, attempt - 1); // 300, 600, 1200ms
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    try {
+      // Re-sign on each attempt: JWT iat shifts forward, body_hash stays
+      // identical, so a clock-skew retry actually has a chance to succeed.
+      const headers = await jwtHeaders(body);
+      const res = await fetch(endpoint, { method: "POST", headers, body });
+      if (res.ok) return (await res.json()) as { seq: number };
+      const text = await res.text().catch(() => "");
+      lastError = `${res.status}: ${text.slice(0, 200)}`;
+      const transient = res.status >= 500 || res.status === 408 || res.status === 429 || res.status === 404 /* ngrok endpoint-offline can show as 404 */;
+      if (!transient) throw new Error(`Wire publish failed (${lastError})`);
+    } catch (e) {
+      // Network / DNS / fetch-throw — retry.
+      lastError = (e as Error).message;
+    }
   }
-  return (await res.json()) as { seq: number };
+  throw new Error(`Wire publish failed after retries (${lastError})`);
 }
 
 // ----- plugin_settings read / write -----
