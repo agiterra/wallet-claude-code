@@ -36,6 +36,7 @@ import {
 import {
   WALLET_SIGN_RESPONSE,
   WALLET_VAULT_TAB_CLAIM,
+  WALLET_VAULT_CREATE_REQUEST,
 } from "@agiterra/wallet-tools";
 import type {
   WalletAccessMode,
@@ -216,6 +217,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     // ---- Vault tools (v0.3) ----
     {
+      name: "wallet_create",
+      description:
+        "Provision a new EOA wallet. The extension generates a fresh secp256k1 keypair, stores the private key encrypted in its vault, registers the wallet in the directory under your agent_id as creator (mode='specific', access=[you]), and returns the new public address. The agent never sees the private key. Names must be unique per calling agent. Optional chain_id sets the default network (Sepolia 11155111 if omitted).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Human-readable wallet name (per-agent unique)." },
+          chain_id: { type: "number", description: "Default chain (e.g. 11155111 for Sepolia)." },
+        },
+        required: ["name"],
+      },
+    },
+    {
       name: "wallet_list",
       description:
         "List the wallets this agent has access to. Returns name, address, chain_id, creator, and access mode for each. Wallets where the caller isn't in the access list (and the mode isn't 'all') are omitted.",
@@ -315,6 +329,53 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         ...(args.data !== undefined ? { data: args.data } : {}),
       });
       return { content: [{ type: "text", text: `Rejected ${rid} with code ${code} (Wire seq ${seq}): ${message}` }] };
+    }
+
+    // ---- Vault provisioning ----
+    case "wallet_create": {
+      const walletName = String(args.name ?? "").trim();
+      if (!walletName) throw new Error("name required");
+      const chainId = args.chain_id != null ? Number(args.chain_id) : undefined;
+      if (chainId != null && !Number.isFinite(chainId)) throw new Error("chain_id must be a number");
+
+      // Reject early if a wallet with this name already exists for this agent.
+      const before = await readDirectory();
+      for (const meta of Object.values(before)) {
+        if (meta.creator === callerAgentId && (meta.name === walletName || meta.operator_name === walletName)) {
+          throw new Error(`agent '${callerAgentId}' already has a wallet named '${walletName}'`);
+        }
+      }
+
+      const requestId = crypto.randomUUID();
+      await publishDirected(WALLET_VAULT_CREATE_REQUEST, {
+        request_id: requestId,
+        name: walletName,
+        ...(chainId != null ? { chain_id: chainId } : {}),
+      });
+
+      // Poll plugin_settings for the new entry. Extension publishes
+      // wallet.vault.created back to us (and the directory updates via
+      // plugin_settings.updated), so the directory cache reflects the new
+      // wallet within a few hundred ms of the extension finishing.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+        const current = await readDirectory();
+        for (const [addr, meta] of Object.entries(current)) {
+          if (before[addr]) continue;
+          if (meta.creator !== callerAgentId) continue;
+          if (meta.name !== walletName) continue;
+          return {
+            content: [{
+              type: "text",
+              text: `Created wallet '${walletName}' at ${addr} (chain ${meta.chain_id}, creator=${callerAgentId}, access=specific:[${callerAgentId}]).`,
+            }],
+          };
+        }
+      }
+      throw new Error(
+        `wallet_create timed out after 15s waiting for the extension. Is the wallet-vault extension reloaded with v0.4 and connected to Wire?`,
+      );
     }
 
     // ---- Vault listing / binding ----
