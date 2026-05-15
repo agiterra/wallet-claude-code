@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/wallet-claude-code",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Wallet plugin for Claude Code — sign-decision tools (approve / refuse / reject_with_error) + vault management (wallet_list / wallet_use + operator-gated grant / revoke / set_access_mode). Reads + edits wallet directory via Wire's plugin_settings.",
   "license": "MIT",
   "type": "module",

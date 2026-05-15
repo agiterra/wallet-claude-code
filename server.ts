@@ -186,8 +186,65 @@ async function publishSignResponse(payload: SignResponse): Promise<{ seq: number
 
 // ----- MCP server -----
 
+// ----- Faucet helper (Circle testnet) -----
+
+const CIRCLE_FAUCET_ENDPOINT = "https://api.circle.com/v1/faucet/drips";
+
+/**
+ * Map a chain_id to the Circle "blockchain" string the faucet accepts.
+ * Reference: https://developers.circle.com/w3s/developer-console-faucet
+ */
+function chainIdToCircleBlockchain(chainId: number): string | null {
+  switch (chainId) {
+    case 11155111: return "ETH";            // Ethereum Sepolia
+    case 84532:    return "BASE";           // Base Sepolia
+    case 421614:   return "ARB";            // Arbitrum Sepolia
+    case 11155420: return "OP";             // Optimism Sepolia
+    case 80002:    return "MATIC";          // Polygon Amoy
+    case 1301:     return "UNI";            // Unichain Sepolia
+    default: return null;
+  }
+}
+
+async function dripCircleUsdc(address: string, chainId: number): Promise<{ ok: true; raw: unknown } | { ok: false; error: string }> {
+  const apiKey = process.env.CIRCLE_FAUCET_API_KEY;
+  if (!apiKey) {
+    return {
+      ok: false,
+      error:
+        "CIRCLE_FAUCET_API_KEY env var not set. Get a free testnet API key at https://console.circle.com (sandbox accounts only need an email). Key format: TEST_API_KEY:abc...:xyz...",
+    };
+  }
+  const blockchain = chainIdToCircleBlockchain(chainId);
+  if (!blockchain) {
+    return { ok: false, error: `Circle faucet doesn't support chain_id ${chainId} (supported: 11155111, 84532, 421614, 11155420, 80002, 1301)` };
+  }
+  const body = JSON.stringify({ address, blockchain, native: false, usdc: true });
+  try {
+    const res = await fetch(CIRCLE_FAUCET_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { ok: false, error: `Circle faucet HTTP ${res.status}: ${text.slice(0, 400)}` };
+    }
+    let raw: unknown = text;
+    try { raw = JSON.parse(text); } catch { /* keep as text */ }
+    return { ok: true, raw };
+  } catch (e) {
+    return { ok: false, error: `Circle faucet network error: ${(e as Error).message}` };
+  }
+}
+
+// ----- MCP server -----
+
 const server = new Server(
-  { name: "wallet", version: "0.3.0" },
+  { name: "wallet", version: "0.4.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -232,6 +289,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           data: {},
         },
         required: ["request_id", "code", "message"],
+      },
+    },
+    // ---- Faucet tools (v0.4) ----
+    {
+      name: "faucet_usdc",
+      description:
+        "Request testnet USDC from Circle's faucet API. Returns 20 USDC per address per chain per 2 hours (Circle's rate limit). Supports Sepolia (11155111), Base Sepolia (84532), Arbitrum Sepolia (421614), Optimism Sepolia (11155420), Polygon Amoy (80002), and Unichain Sepolia (1301). Requires CIRCLE_FAUCET_API_KEY env var (free from console.circle.com). Use this to fund agent-owned wallets for marketplace tests (e.g., the Fabrica Seaport buy flow).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          address: { type: "string", description: "0x-prefixed Ethereum address to receive USDC." },
+          chain_id: { type: "number", description: "Target chain. Defaults to Sepolia (11155111)." },
+        },
+        required: ["address"],
       },
     },
     // ---- Vault tools (v0.3) ----
@@ -348,6 +419,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         ...(args.data !== undefined ? { data: args.data } : {}),
       });
       return { content: [{ type: "text", text: `Rejected ${rid} with code ${code} (Wire seq ${seq}): ${message}` }] };
+    }
+
+    // ---- Faucet ----
+    case "faucet_usdc": {
+      const address = String(args.address ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error("address must be a 0x-prefixed 20-byte hex address");
+      const chainId = args.chain_id != null ? Number(args.chain_id) : 11155111;
+      if (!Number.isFinite(chainId)) throw new Error("chain_id must be a number");
+      const result = await dripCircleUsdc(address, chainId);
+      if (!result.ok) throw new Error(result.error);
+      return {
+        content: [{
+          type: "text",
+          text: `Requested USDC from Circle faucet for ${address} on chain ${chainId}. Funds typically arrive within seconds.\n\nResponse:\n${JSON.stringify(result.raw, null, 2)}`,
+        }],
+      };
     }
 
     // ---- Vault provisioning ----
