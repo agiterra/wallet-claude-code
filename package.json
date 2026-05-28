@@ -1,14 +1,15 @@
 {
   "name": "@agiterra/wallet-claude-code",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Wallet plugin for Claude Code — sign-decision tools (approve / refuse / reject_with_error) + vault management (wallet_list / wallet_use + operator-gated grant / revoke / set_access_mode). Reads + edits wallet directory via Wire's plugin_settings.",
   "license": "MIT",
   "type": "module",
   "bin": "./server.ts",
   "scripts": {
-    "start": "bun install --no-summary && bun server.ts"
+    "start": "bun install --no-summary && ./node_modules/@agiterra/mcp-tee/bin/mcp-tee.sh wallet bun server.ts"
   },
   "dependencies": {
+    "@agiterra/mcp-tee": "agiterra/mcp-tee#v0.1.0",
     "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.2.0",
     "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5",
     "@modelcontextprotocol/sdk": "^1.0.0"

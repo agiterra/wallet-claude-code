@@ -5,6 +5,7 @@
     "": {
       "name": "@agiterra/wallet-claude-code",
       "dependencies": {
+        "@agiterra/mcp-tee": "agiterra/mcp-tee#v0.1.0",
         "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.2.0",
         "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5",
         "@modelcontextprotocol/sdk": "^1.0.0",
@@ -15,6 +16,8 @@
     },
   },
   "packages": {
+    "@agiterra/mcp-tee": ["@agiterra/mcp-tee@github:agiterra/mcp-tee#ecdf634", { "bin": { "mcp-tee": "./bin/mcp-tee.sh" } }, "agiterra-mcp-tee-ecdf634", "sha512-JWjvscg2DDNrBidXKPTveVQQmTI2iWC3KnsexKy45ZiahQNyo0tbQXkCn/r1FQrt4OPO9na8capDbc7GdF/bRw=="],
+
     "@agiterra/wallet-tools": ["@agiterra/wallet-tools@github:agiterra/wallet-tools#5d85319", { "dependencies": { "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5", "@noble/curves": "^1.6.0", "@noble/hashes": "^1.5.0" } }, "agiterra-wallet-tools-5d85319", "sha512-Gc5n0IOvVtXME2g+npYRPf8o/Ob8teE6WhwZdWiq9ksf4M8t9MfdjZms7Vf2vkEQDgt0cMDoHO33MT+tYd57/Q=="],
 
     "@agiterra/wire-tools": ["@agiterra/wire-tools@github:agiterra/wire-tools#1f5ff65", { "dependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "pino": "^10.3.1" } }, "agiterra-wire-tools-1f5ff65", "sha512-0bLptUllC3Zj5YX+RzXSRvRz8IdFSJpjGVaurAxvCrUJ2csinqevMqR7Zej8IjBzTLBirZYtCIxGih2DKXPbcw=="],
@@ -238,8 +241,6 @@
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
-
-    "@agiterra/wallet-tools/@agiterra/wire-tools": ["@agiterra/wire-tools@github:agiterra/wire-tools#1f5ff65", { "dependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "pino": "^10.3.1" } }, "agiterra-wire-tools-1f5ff65", "sha512-0bLptUllC3Zj5YX+RzXSRvRz8IdFSJpjGVaurAxvCrUJ2csinqevMqR7Zej8IjBzTLBirZYtCIxGih2DKXPbcw=="],
 
     "thread-stream/real-require": ["real-require@1.0.0", "", {}, "sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g=="],
 
