@@ -85,10 +85,18 @@ async function jwtHeaders(body: string): Promise<Record<string, string>> {
   return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 }
 
-async function publishDirected(topic: string, payload: unknown): Promise<{ seq: number }> {
+// `dest` is the Wire id of the target wallet-vault EXTENSION instance. Defaults
+// to the canonical "wallet-vault"; pass a non-default id to drive a specific
+// instance (e.g. a browser-use launch registered as "wallet-vault-e2e"). This
+// is what lets the wallet work across more than one live extension — the
+// extension's Wire id is now configurable (wallet-extension wire-identity.ts),
+// so the MCP can no longer assume a single "wallet-vault". For sign responses
+// the caller passes the request's ENVELOPE source (the vault id that published
+// the sign.request); for create/tab-claim it names the target instance.
+async function publishDirected(topic: string, payload: unknown, dest: string = WALLET_VAULT_DEST): Promise<{ seq: number }> {
   const url = requireEnv("WIRE_URL").replace(/\/$/, "");
   const body = JSON.stringify(payload);
-  const endpoint = `${url}/webhooks/${WALLET_VAULT_DEST}/${topic}`;
+  const endpoint = `${url}/webhooks/${dest}/${topic}`;
 
   // Retry transient failures (ngrok blips, brief 5xx, JWT body-hash mismatch
   // on clock skew). Total wait ≤ ~7s before giving up. Real auth errors
@@ -180,8 +188,18 @@ interface SignResponseRefuse  { request_id: string; action: "refuse"; reason?: s
 interface SignResponseReject  { request_id: string; action: "reject_with_error"; code: number; message: string; data?: unknown }
 type SignResponse = SignResponseApprove | SignResponseRefuse | SignResponseReject;
 
-async function publishSignResponse(payload: SignResponse): Promise<{ seq: number }> {
-  return publishDirected(WALLET_SIGN_RESPONSE, payload);
+async function publishSignResponse(payload: SignResponse, dest: string = WALLET_VAULT_DEST): Promise<{ seq: number }> {
+  return publishDirected(WALLET_SIGN_RESPONSE, payload, dest);
+}
+
+// Resolve the target wallet-vault instance from a tool call's optional
+// `vault_id`. Defaults to the canonical "wallet-vault" (backward-compatible);
+// a non-default value routes to a specific extension instance. For sign
+// decisions the caller passes the request's channel-event source (the vault id
+// that published the sign.request); for create/tab-claim it names the instance.
+function destFromArgs(args: Record<string, unknown>): string {
+  const v = args.vault_id;
+  return typeof v === "string" && v.trim() ? v.trim() : WALLET_VAULT_DEST;
 }
 
 // ----- MCP server -----
@@ -259,6 +277,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           request_id: { type: "string", description: "request_id from the incoming wallet.sign.request channel event." },
+          vault_id: { type: "string", description: "Optional. Wire id of the wallet-vault instance to respond to — pass the SOURCE of the incoming wallet.sign.request channel event when it's a non-default instance (e.g. 'wallet-vault-e2e'). Defaults to 'wallet-vault'." },
         },
         required: ["request_id"],
       },
@@ -272,6 +291,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           request_id: { type: "string" },
           reason: { type: "string" },
+          vault_id: { type: "string", description: "Optional. Wire id of the wallet-vault instance to respond to (the sign.request's source). Defaults to 'wallet-vault'." },
         },
         required: ["request_id"],
       },
@@ -287,6 +307,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           code: { type: "number" },
           message: { type: "string" },
           data: {},
+          vault_id: { type: "string", description: "Optional. Wire id of the wallet-vault instance to respond to (the sign.request's source). Defaults to 'wallet-vault'." },
         },
         required: ["request_id", "code", "message"],
       },
@@ -315,6 +336,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           name: { type: "string", description: "Human-readable wallet name (per-agent unique)." },
           chain_id: { type: "number", description: "Default chain (e.g. 11155111 for Sepolia)." },
+          vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault extension instance. Defaults to 'wallet-vault'." },
         },
         required: ["name"],
       },
@@ -334,6 +356,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           tab_id: { type: "string", description: "Browser tab identifier (e.g. Chrome MCP tabId stringified)." },
           wallet: { type: "string", description: "Wallet name or 0x-address." },
+          vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault extension instance. Defaults to 'wallet-vault'." },
         },
         required: ["tab_id", "wallet"],
       },
@@ -390,7 +413,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "wallet_approve": {
       const rid = String(args.request_id ?? "").trim();
       if (!rid) throw new Error("request_id required");
-      const { seq } = await publishSignResponse({ request_id: rid, action: "approve" });
+      const { seq } = await publishSignResponse({ request_id: rid, action: "approve" }, destFromArgs(args));
       return { content: [{ type: "text", text: `Approved ${rid} (Wire seq ${seq}).` }] };
     }
     case "wallet_refuse": {
@@ -401,7 +424,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         request_id: rid,
         action: "refuse",
         ...(reason ? { reason } : {}),
-      });
+      }, destFromArgs(args));
       return { content: [{ type: "text", text: `Refused ${rid} (Wire seq ${seq})${reason ? ` — reason: ${reason}` : ""}.` }] };
     }
     case "wallet_reject_with_error": {
@@ -417,7 +440,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         code,
         message,
         ...(args.data !== undefined ? { data: args.data } : {}),
-      });
+      }, destFromArgs(args));
       return { content: [{ type: "text", text: `Rejected ${rid} with code ${code} (Wire seq ${seq}): ${message}` }] };
     }
 
@@ -457,7 +480,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         request_id: requestId,
         name: walletName,
         ...(chainId != null ? { chain_id: chainId } : {}),
-      });
+      }, destFromArgs(args));
 
       // Poll plugin_settings for the new entry. Extension publishes
       // wallet.vault.created back to us (and the directory updates via
@@ -520,7 +543,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const { seq } = await publishDirected(WALLET_VAULT_TAB_CLAIM, {
         tab_id: tabId,
         wallet_address: found.address,
-      });
+      }, destFromArgs(args));
       return {
         content: [{
           type: "text",
