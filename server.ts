@@ -128,9 +128,9 @@ async function publishDirected(topic: string, payload: unknown, dest: string = W
 
 // ----- plugin_settings read / write -----
 
-async function readDirectory(): Promise<WalletDirectory> {
+async function readDirectory(vaultId: string = WALLET_VAULT_NAMESPACE): Promise<WalletDirectory> {
   const url = requireEnv("WIRE_URL").replace(/\/$/, "");
-  const res = await fetch(`${url}/plugin_settings/${WALLET_VAULT_NAMESPACE}/${WALLETS_KEY}`);
+  const res = await fetch(`${url}/plugin_settings/${vaultId}/${WALLETS_KEY}`);
   if (res.status === 404) return {};
   if (!res.ok) {
     throw new Error(`plugin_settings GET failed (${res.status}): ${await res.text().catch(() => "")}`);
@@ -139,11 +139,11 @@ async function readDirectory(): Promise<WalletDirectory> {
   return body.value ?? {};
 }
 
-async function writeDirectoryAsOperator(directory: WalletDirectory): Promise<void> {
+async function writeDirectoryAsOperator(directory: WalletDirectory, vaultId: string = WALLET_VAULT_NAMESPACE): Promise<void> {
   const url = requireEnv("WIRE_URL").replace(/\/$/, "");
   const token = operatorToken();
   const body = JSON.stringify({ value: directory });
-  const res = await fetch(`${url}/plugin_settings/${WALLET_VAULT_NAMESPACE}/${WALLETS_KEY}?token=${encodeURIComponent(token)}`, {
+  const res = await fetch(`${url}/plugin_settings/${vaultId}/${WALLETS_KEY}?token=${encodeURIComponent(token)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body,
@@ -345,7 +345,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "wallet_list",
       description:
         "List the wallets this agent has access to. Returns name, address, chain_id, creator, and access mode for each. Wallets where the caller isn't in the access list (and the mode isn't 'all') are omitted.",
-      inputSchema: { type: "object", properties: {} },
+      inputSchema: { type: "object", properties: { vault_id: { type: "string", description: "Optional. Wire id of the wallet-vault instance to list from. Defaults to 'wallet-vault'." } } },
     },
     {
       name: "wallet_use",
@@ -370,6 +370,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           wallet: { type: "string", description: "Wallet name or address." },
           agent_id: { type: "string", description: "Agent to grant access to." },
+          vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault instance. Defaults to 'wallet-vault'." },
         },
         required: ["wallet", "agent_id"],
       },
@@ -383,6 +384,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           wallet: { type: "string" },
           agent_id: { type: "string" },
+          vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault instance. Defaults to 'wallet-vault'." },
         },
         required: ["wallet", "agent_id"],
       },
@@ -396,6 +398,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           wallet: { type: "string" },
           mode: { type: "string", enum: ["creator-only", "specific", "all"] },
+          vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault instance. Defaults to 'wallet-vault'." },
         },
         required: ["wallet", "mode"],
       },
@@ -467,8 +470,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const chainId = args.chain_id != null ? Number(args.chain_id) : undefined;
       if (chainId != null && !Number.isFinite(chainId)) throw new Error("chain_id must be a number");
 
+      const dest = destFromArgs(args);
       // Reject early if a wallet with this name already exists for this agent.
-      const before = await readDirectory();
+      const before = await readDirectory(dest);
       for (const meta of Object.values(before)) {
         if (meta.creator === callerAgentId && (meta.name === walletName || meta.operator_name === walletName)) {
           throw new Error(`agent '${callerAgentId}' already has a wallet named '${walletName}'`);
@@ -480,7 +484,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         request_id: requestId,
         name: walletName,
         ...(chainId != null ? { chain_id: chainId } : {}),
-      }, destFromArgs(args));
+      }, dest);
 
       // Poll plugin_settings for the new entry. Extension publishes
       // wallet.vault.created back to us (and the directory updates via
@@ -489,7 +493,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 500));
-        const current = await readDirectory();
+        const current = await readDirectory(dest);
         for (const [addr, meta] of Object.entries(current)) {
           if (before[addr]) continue;
           if (meta.creator !== callerAgentId) continue;
@@ -509,7 +513,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // ---- Vault listing / binding ----
     case "wallet_list": {
-      const dir = await readDirectory();
+      const dir = await readDirectory(destFromArgs(args));
       const accessible = callerAccessibleWallets(dir, callerAgentId);
       const rows = Object.entries(accessible).map(([address, meta]) => ({
         address,
@@ -533,7 +537,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const walletQuery = String(args.wallet ?? "").trim();
       if (!walletQuery) throw new Error("wallet (name or address) required");
 
-      const dir = await readDirectory();
+      const dest = destFromArgs(args);
+      const dir = await readDirectory(dest);
       const found = findWalletByNameOrAddress(dir, walletQuery);
       if (!found) throw new Error(`no wallet matches '${walletQuery}'`);
       if (found.meta.access.mode !== "all" && !found.meta.access.agents.includes(callerAgentId)) {
@@ -543,7 +548,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const { seq } = await publishDirected(WALLET_VAULT_TAB_CLAIM, {
         tab_id: tabId,
         wallet_address: found.address,
-      }, destFromArgs(args));
+      }, dest);
       return {
         content: [{
           type: "text",
@@ -556,9 +561,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "wallet_grant":
     case "wallet_revoke":
     case "wallet_set_access_mode": {
+      const dest = destFromArgs(args);
       const walletQuery = String(args.wallet ?? "").trim();
       if (!walletQuery) throw new Error("wallet (name or address) required");
-      const dir = await readDirectory();
+      const dir = await readDirectory(dest);
       const found = findWalletByNameOrAddress(dir, walletQuery);
       if (!found) throw new Error(`no wallet matches '${walletQuery}'`);
 
@@ -582,7 +588,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       const next: WalletDirectory = { ...dir, [found.address]: meta };
-      await writeDirectoryAsOperator(next);
+      await writeDirectoryAsOperator(next, dest);
       return {
         content: [{
           type: "text",
