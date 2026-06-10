@@ -11,10 +11,15 @@
  *   2. Vault management tools (v0.3.0): wallet_list / wallet_use /
  *      wallet_grant / wallet_revoke / wallet_set_access_mode — read
  *      and (operator-only for grant/revoke/mode) edit the wallet
- *      directory stored in Wire's plugin_settings (namespace="wallet-vault",
- *      key="wallets"). wallet_use publishes a tab-claim so subsequent
- *      sign requests originating in that browser tab route to the
- *      calling agent.
+ *      directory stored in Wire's plugin_settings under the vault's
+ *      namespace (default "wallet-vault"). Since v0.8.0 (ENG-3313)
+ *      each wallet lives under its own `wallet:<lowercase-address>`
+ *      key — concurrent writers touch distinct rows, so creates can't
+ *      clobber each other. Reads merge the legacy whole-roster
+ *      `wallets` blob (per-key wins) until every writer has migrated;
+ *      writes are per-key only. wallet_use publishes a tab-claim so
+ *      subsequent sign requests originating in that browser tab route
+ *      to the calling agent.
  *
  * Identity: this MCP server runs as the current Claude Code agent
  * (AGENT_ID + AGENT_PRIVATE_KEY + WIRE_URL from env, set by
@@ -37,6 +42,8 @@ import {
   WALLET_SIGN_RESPONSE,
   WALLET_VAULT_TAB_CLAIM,
   WALLET_VAULT_CREATE_REQUEST,
+  mergeWalletDirectory,
+  walletSettingKey,
 } from "@agiterra/wallet-tools";
 import type {
   WalletAccessMode,
@@ -47,7 +54,6 @@ import { createAuthJwt, importKeyPair } from "@agiterra/wire-tools/crypto";
 
 const WALLET_VAULT_DEST = "wallet-vault";
 const WALLET_VAULT_NAMESPACE = "wallet-vault";
-const WALLETS_KEY = "wallets";
 
 // ----- Env helpers -----
 
@@ -128,22 +134,29 @@ async function publishDirected(topic: string, payload: unknown, dest: string = W
 
 // ----- plugin_settings read / write -----
 
+// Read the whole vault namespace and merge both storage generations:
+// legacy `wallets` blob first, per-key `wallet:<addr>` entries winning
+// per address (see @agiterra/wallet-tools/directory for the convention).
 async function readDirectory(vaultId: string = WALLET_VAULT_NAMESPACE): Promise<WalletDirectory> {
   const url = requireEnv("WIRE_URL").replace(/\/$/, "");
-  const res = await fetch(`${url}/plugin_settings/${vaultId}/${WALLETS_KEY}`);
+  const res = await fetch(`${url}/plugin_settings/${vaultId}`);
   if (res.status === 404) return {};
   if (!res.ok) {
     throw new Error(`plugin_settings GET failed (${res.status}): ${await res.text().catch(() => "")}`);
   }
-  const body = (await res.json()) as { value?: WalletDirectory };
-  return body.value ?? {};
+  const settings = (await res.json()) as Record<string, unknown>;
+  return mergeWalletDirectory(settings);
 }
 
-async function writeDirectoryAsOperator(directory: WalletDirectory, vaultId: string = WALLET_VAULT_NAMESPACE): Promise<void> {
+// Upsert ONE wallet under its own key. Never writes the legacy blob —
+// a whole-roster PUT is exactly the race that clobbered concurrent
+// creates (ENG-3313). Editing a legacy-blob wallet through here
+// migrates it: the per-key copy shadows the stale blob entry on read.
+async function writeWalletAsOperator(address: string, meta: WalletMeta, vaultId: string = WALLET_VAULT_NAMESPACE): Promise<void> {
   const url = requireEnv("WIRE_URL").replace(/\/$/, "");
   const token = operatorToken();
-  const body = JSON.stringify({ value: directory });
-  const res = await fetch(`${url}/plugin_settings/${vaultId}/${WALLETS_KEY}?token=${encodeURIComponent(token)}`, {
+  const body = JSON.stringify({ value: meta });
+  const res = await fetch(`${url}/plugin_settings/${vaultId}/${encodeURIComponent(walletSettingKey(address))}?token=${encodeURIComponent(token)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body,
@@ -262,7 +275,7 @@ async function dripCircleUsdc(address: string, chainId: number): Promise<{ ok: t
 // ----- MCP server -----
 
 const server = new Server(
-  { name: "wallet", version: "0.4.0" },
+  { name: "wallet", version: "0.8.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -587,8 +600,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         meta.access.mode = mode;
       }
 
-      const next: WalletDirectory = { ...dir, [found.address]: meta };
-      await writeDirectoryAsOperator(next, dest);
+      await writeWalletAsOperator(found.address, meta, dest);
       return {
         content: [{
           type: "text",
@@ -607,7 +619,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[wallet] MCP server connected (v0.3.0)");
+  console.error("[wallet] MCP server connected (v0.8.0)");
 }
 
 main().catch((e) => {
