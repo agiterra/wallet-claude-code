@@ -41,14 +41,17 @@ import {
 import {
   WALLET_SIGN_RESPONSE,
   WALLET_VAULT_TAB_CLAIM,
+  WALLET_VAULT_TAB_RELEASE,
   WALLET_VAULT_CREATE_REQUEST,
   mergeWalletDirectory,
   walletSettingKey,
+  tabClaimSettingKey,
 } from "@agiterra/wallet-tools";
 import type {
   WalletAccessMode,
   WalletDirectory,
   WalletMeta,
+  WalletTabClaimStatus,
 } from "@agiterra/wallet-tools";
 import { createAuthJwt, importKeyPair } from "@agiterra/wire-tools/crypto";
 
@@ -164,6 +167,21 @@ async function writeWalletAsOperator(address: string, meta: WalletMeta, vaultId:
   if (!res.ok) {
     throw new Error(`plugin_settings PUT failed (${res.status}): ${await res.text().catch(() => "")}`);
   }
+}
+
+// ----- Tab-claim ack polling (AGI-16 fail-loud binding) -----
+
+// The extension writes every claim outcome (accepted | refused+reason) to
+// plugin_settings under tab_claim:<tab_id>, and DELETEs it on release. The
+// namespace GET is public, so polling needs no auth.
+async function readTabClaimStatus(vaultId: string, tabId: string): Promise<WalletTabClaimStatus | null> {
+  const url = requireEnv("WIRE_URL").replace(/\/$/, "");
+  const res = await fetch(`${url}/plugin_settings/${vaultId}`);
+  if (!res.ok) {
+    throw new Error(`plugin_settings GET failed (${res.status}): ${await res.text().catch(() => "")}`);
+  }
+  const all = (await res.json()) as Record<string, unknown>;
+  return (all[tabClaimSettingKey(tabId)] as WalletTabClaimStatus | undefined) ?? null;
 }
 
 // ----- Access helpers -----
@@ -363,15 +381,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "wallet_use",
       description:
-        "Bind a wallet to a browser tab. Subsequent EIP-1193 sign requests originating in that tab will be routed to the calling agent for approval. The agent must have access to the wallet (be in its access list, or the wallet must be mode:'all'). Pass `tab_id` from the tool you used to open the tab (e.g. Chrome MCP tabs_create_mcp). The wallet may be referenced by name (case-insensitive) or 0x-address.",
+        "Bind a wallet to a browser tab and AWAIT the vault's explicit claim outcome — errors loudly on refusal (no access, unknown wallet, wallet not signable by that vault instance) or 15s timeout. Subsequent EIP-1193 sign requests originating in that tab route to the calling agent for approval. `tab_id` must be the REAL chrome.tabs tab id: get it from the page itself via window.ethereum.request({method:'agiterra_getTabId'}) (works under any driver, incl. playwright-mcp browser_evaluate — a Playwright page INDEX is NOT a tab id), or from Chrome MCP's tab list. The wallet may be referenced by name (case-insensitive) or 0x-address.",
       inputSchema: {
         type: "object",
         properties: {
-          tab_id: { type: "string", description: "Browser tab identifier (e.g. Chrome MCP tabId stringified)." },
+          tab_id: { type: "string", description: "REAL Chrome tab id, stringified (from agiterra_getTabId or Chrome MCP — never a Playwright page index)." },
           wallet: { type: "string", description: "Wallet name or 0x-address." },
           vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault extension instance. Defaults to 'wallet-vault'." },
         },
         required: ["tab_id", "wallet"],
+      },
+    },
+    {
+      name: "wallet_release",
+      description:
+        "Release a tab's wallet binding (the inverse of wallet_use). Only the claim's owner may release it. Awaits confirmation (the vault deletes the claim ack) and errors on 15s timeout. Use in teardown so stale claims never outlive a session.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tab_id: { type: "string", description: "The tab id whose binding to release." },
+          vault_id: { type: "string", description: "Optional. Wire id of the target wallet-vault extension instance. Defaults to 'wallet-vault'." },
+        },
+        required: ["tab_id"],
       },
     },
     {
@@ -558,16 +589,63 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         throw new Error(`agent ${callerAgentId} has no access to wallet ${found.address} (${found.meta.name}). Ask the operator to grant access via wallet_grant.`);
       }
 
+      const publishedAt = Date.now();
       const { seq } = await publishDirected(WALLET_VAULT_TAB_CLAIM, {
         tab_id: tabId,
         wallet_address: found.address,
       }, dest);
-      return {
-        content: [{
-          type: "text",
-          text: `Bound tab ${tabId} to wallet ${found.address} (${found.meta.name}). Wire seq ${seq}. Subsequent sign requests in this tab will route to ${callerAgentId}.`,
-        }],
-      };
+
+      // Fail-loud (AGI-16): await the extension's explicit claim outcome
+      // instead of reporting fire-and-forget success. 5s clock-skew grace on
+      // `at` so a same-host restart clock nudge can't orphan a fresh ack.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+        const status = await readTabClaimStatus(dest, tabId).catch(() => null);
+        if (!status) continue;
+        if (status.agent_id !== callerAgentId) continue;
+        if (status.wallet_address !== found.address.toLowerCase()) continue;
+        if (status.at < publishedAt - 5_000) continue; // stale ack from an earlier claim
+        if (status.status === "refused") {
+          throw new Error(`tab_claim refused by vault '${dest}': ${status.reason ?? "(no reason given)"}`);
+        }
+        return {
+          content: [{
+            type: "text",
+            text: `Bound tab ${tabId} to wallet ${found.address} (${found.meta.name}) — claim ACCEPTED by vault '${dest}' (wire seq ${seq}). Subsequent sign requests in this tab route to ${callerAgentId}. Verify from the page: window.ethereum.request({method:'eth_accounts'}) should return ${found.address}.`,
+          }],
+        };
+      }
+      throw new Error(
+        `tab_claim published (seq ${seq}) but no ack within 15s. Either the vault extension predates v0.5.0 (no claim-ack support), or it isn't connected to Wire, or the claim was dropped. Verify in-page with window.ethereum.request({method:'eth_accounts'}).`,
+      );
+    }
+    case "wallet_release": {
+      const tabId = String(args.tab_id ?? "").trim();
+      if (!tabId) throw new Error("tab_id required");
+      const dest = destFromArgs(args);
+      const { seq } = await publishDirected(WALLET_VAULT_TAB_RELEASE, { tab_id: tabId }, dest);
+
+      // The extension deletes the tab_claim:<tab_id> key on release; poll for
+      // absence. Only the claim owner may release — a refusal leaves the key
+      // in place and we time out with that context.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+        const status = await readTabClaimStatus(dest, tabId).catch(() => undefined);
+        if (status === undefined) continue; // transient read failure — keep polling
+        if (status === null) {
+          return {
+            content: [{
+              type: "text",
+              text: `Released tab ${tabId} binding on vault '${dest}' (wire seq ${seq}).`,
+            }],
+          };
+        }
+      }
+      throw new Error(
+        `tab_release published (seq ${seq}) but the claim ack for tab ${tabId} still exists after 15s. Only the claim's owner may release it — if another agent holds the claim, ask them (or re-claim with wallet_use). The extension may also predate v0.5.0 (no release support).`,
+      );
     }
 
     // ---- Operator-gated permission edits ----
