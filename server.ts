@@ -56,6 +56,10 @@ import type {
 import { createAuthJwt, importKeyPair } from "@agiterra/wire-tools/crypto";
 
 const WALLET_VAULT_DEST = "wallet-vault";
+// The DISPENSE custodian is the headless wallet-vault-service (Wire id "wallet-vault-plugin",
+// j:1098-1100), NOT the browser extension ("wallet-vault"). 2026-09-02: dispense requests sent
+// to the extension id were dropped as forward_no_peer with no reply. Override via env.
+const WALLET_DISPENSE_DEST = process.env.WALLET_VAULT_SERVICE_ID?.trim() || "wallet-vault-plugin";
 const WALLET_VAULT_NAMESPACE = "wallet-vault";
 
 // ----- Env helpers -----
@@ -357,6 +361,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["address"],
       },
     },
+    {
+      name: "wallet_dispense",
+      description:
+        "Fund a wallet with testnet SepoliaETH + USDC from the shared custodian pool (WALLET_DISPENSE, supersedes the dead Circle faucet_usdc). The wallet-vault service is the sole pool custodian: it signs+broadcasts TWO nonce-sequenced txs (ETH then USDC) to your address and posts the two tx hashes back as a 'wallet.dispense.result' event on your Wire channel (this tool returns immediately after dispatch — read your channel for the hashes). No metering. Sepolia only for now (11155111). Use to fund fresh agent EOAs/smart-accounts for marketplace + onboarding tests.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent_address: { type: "string", description: "0x-prefixed 20-byte address to fund with ETH+USDC." },
+          chain_id: { type: "number", description: "Target chain. Defaults to Sepolia (11155111)." },
+        },
+        required: ["agent_address"],
+      },
+    },
     // ---- Vault tools (v0.3) ----
     {
       name: "wallet_create",
@@ -503,6 +520,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         content: [{
           type: "text",
           text: `Requested USDC from Circle faucet for ${address} on chain ${chainId}. Funds typically arrive within seconds.\n\nResponse:\n${JSON.stringify(result.raw, null, 2)}`,
+        }],
+      };
+    }
+
+    case "wallet_dispense": {
+      const agentAddress = String(args.agent_address ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) throw new Error("agent_address must be a 0x-prefixed 20-byte hex address");
+      const chainId = args.chain_id != null ? Number(args.chain_id) : 11155111;
+      if (!Number.isFinite(chainId)) throw new Error("chain_id must be a number");
+      const requestId = crypto.randomUUID();
+      const { seq } = await publishDirected("wallet.dispense.request", { request_id: requestId, agent_address: agentAddress, chain_id: chainId }, WALLET_DISPENSE_DEST);
+      return {
+        content: [{
+          type: "text",
+          text: `Dispense requested for ${agentAddress} on chain ${chainId} (request_id ${requestId}, seq ${seq}). The pool custodian will drip SepoliaETH + USDC as two nonce-sequenced txs and post the two tx hashes as a 'wallet.dispense.result' channel event addressed to you. This tool returns after dispatch — read your Wire channel for the hashes.`,
         }],
       };
     }
