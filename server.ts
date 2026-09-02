@@ -56,10 +56,10 @@ import type {
 import { createAuthJwt, importKeyPair } from "@agiterra/wire-tools/crypto";
 
 const WALLET_VAULT_DEST = "wallet-vault";
-// The DISPENSE custodian is the headless wallet-vault-service (Wire id "wallet-vault-plugin",
+// The DISPENSE custodian is the headless wallet-vault-service. Since the 2026-09-02 cutover (AGI-86) it owns the canonical Wire id "wallet-vault"; "wallet-vault-plugin" was its temp id (
 // j:1098-1100), NOT the browser extension ("wallet-vault"). 2026-09-02: dispense requests sent
 // to the extension id were dropped as forward_no_peer with no reply. Override via env.
-const WALLET_DISPENSE_DEST = process.env.WALLET_VAULT_SERVICE_ID?.trim() || "wallet-vault-plugin";
+const WALLET_DISPENSE_DEST = process.env.WALLET_VAULT_SERVICE_ID?.trim() || "wallet-vault";
 const WALLET_VAULT_NAMESPACE = "wallet-vault";
 
 // ----- Env helpers -----
