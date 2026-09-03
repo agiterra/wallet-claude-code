@@ -350,7 +350,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // ---- Faucet tools (v0.4) ----
     {
       name: "faucet_usdc",
-      description:
+      description: "RETIRED (2026-09-03): the Circle faucet is dead. Use wallet_dispense for testnet USDC/ETH from the shared custodian pool; wallet_pool_inventory shows what it holds.",
         "Request testnet USDC from Circle's faucet API. Returns 20 USDC per address per chain per 2 hours (Circle's rate limit). Supports Sepolia (11155111), Base Sepolia (84532), Arbitrum Sepolia (421614), Optimism Sepolia (11155420), Polygon Amoy (80002), and Unichain Sepolia (1301). Requires CIRCLE_FAUCET_API_KEY env var (free from console.circle.com). Use this to fund agent-owned wallets for marketplace tests (e.g., the Fabrica Seaport buy flow).",
       inputSchema: {
         type: "object",
@@ -526,6 +526,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // ---- Faucet ----
     case "faucet_usdc": {
+      // RETIRED 2026-09-03: the Circle faucet is dead (j:1098) and every lane that tried it stalled on
+      // CIRCLE_FAUCET_API_KEY. The shared custodian pool is the only USDC source: wallet_dispense.
+      return { content: [{ type: "text", text: JSON.stringify({ ok: false, retired: true, error: "faucet_usdc is retired: the Circle faucet is dead. Testnet USDC (and ETH, and banked properties) come from the shared custodian pool: call wallet_dispense(agent_address) — check wallet_pool_inventory first; if the pool is short the dispense reply says so and the fleet meter flags it for the operator." }) }] };
+    }
+    case "faucet_usdc_retired_original": {
       const address = String(args.address ?? "").trim();
       if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error("address must be a 0x-prefixed 20-byte hex address");
       const chainId = args.chain_id != null ? Number(args.chain_id) : 11155111;

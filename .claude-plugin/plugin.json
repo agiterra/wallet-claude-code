@@ -1,7 +1,7 @@
 {
   "name": "wallet",
   "description": "Agent wallet plugin for Claude Code \u2014 sign decisions (approve / refuse / reject_with_error) + vault management (wallet_list / wallet_use + operator-gated grant / revoke / set_access_mode). Edits wallet directory via Wire's plugin_settings.",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "keywords": [
     "wallet",
     "ethereum",
