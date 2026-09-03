@@ -375,6 +375,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "wallet_send",
+      description:
+        "Sign and broadcast a transaction (or sign a message) with a VAULT-custodied wallet you have a grant on, through the wallet-vault service — no browser, no extension (2026-09-03: lane wallets from wallet_create are vault-custodied; the fleet browser has no window.ethereum). Publishes a wallet.sign.request; the service authorizes (creator or access list), signs with the vault key, broadcasts, and posts the tx hash back as a 'wallet.sign.result' channel event addressed to you (this tool returns after dispatch — read your channel). method eth_sendTransaction with params [{to, value?, data?, gas?}] (from is your wallet); personal_sign / eth_signTypedData_v4 also accepted. Sepolia default.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          wallet_address: { type: "string", description: "0x-prefixed 20-byte address of a vault wallet you may use (your wallet_create result)." },
+          method: { type: "string", description: "EIP-1193 method: eth_sendTransaction (default), personal_sign, eth_signTypedData_v4." },
+          params: { type: "array", items: {}, description: "Method params. For eth_sendTransaction: [{ to, value?: '0x..' wei, data?: '0x..', gas?: '0x..' }]." },
+          chain_id: { type: "number", description: "Target chain. Defaults to Sepolia (11155111)." },
+        },
+        required: ["wallet_address", "params"],
+      },
+    },
+    {
       name: "wallet_dispense",
       description:
         "Fund a wallet with testnet SepoliaETH + USDC from the shared custodian pool (WALLET_DISPENSE, supersedes the dead Circle faucet_usdc). The wallet-vault service is the sole pool custodian: it signs+broadcasts TWO nonce-sequenced txs (ETH then USDC) to your address and posts the two tx hashes back as a 'wallet.dispense.result' event on your Wire channel (this tool returns immediately after dispatch — read your channel for the hashes). No metering. Sepolia only for now (11155111). Use to fund fresh agent EOAs/smart-accounts for marketplace + onboarding tests.",
@@ -573,6 +588,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         properties: { status: props.status, contract: props.contract, network: props.network, count: props.count, last_block: props.last_block, error: props.error || null, offset, limit, items,
           note: "the meter file lists the first 25 ids; the full ledger is /opt/agiterra/watch/state/pool-properties.json" } };
       return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+    }
+    case "wallet_send": {
+      const walletAddress = String(args.wallet_address ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) throw new Error("wallet_address must be a 0x-prefixed 20-byte hex address");
+      const method = String(args.method ?? "eth_sendTransaction").trim();
+      const params = Array.isArray(args.params) ? args.params : [];
+      const chainId = typeof args.chain_id === "number" ? args.chain_id : 11155111;
+      const requestId = crypto.randomUUID();
+      const { seq } = await publishDirected("wallet.sign.request", { request_id: requestId, wallet_address: walletAddress, method, params, chain_id: chainId }, WALLET_VAULT_DEST);
+      return { content: [{ type: "text", text: `Sign request ${requestId} dispatched (seq ${seq}) for ${walletAddress} on chain ${chainId}: ${method}. The wallet-vault service authorizes against the wallet's access list, signs with the vault key, broadcasts if it is a transaction, and posts a 'wallet.sign.result' channel event to you with { result: <txHash|signature> } or { error }. Read your channel for it.` }] };
     }
     case "wallet_dispense": {
       const agentAddress = String(args.agent_address ?? "").trim();
