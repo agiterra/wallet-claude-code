@@ -362,6 +362,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "wallet_pool_inventory",
+      description:
+        "Read what the shared custodian pool can dispense: SepoliaETH and USDC balances plus the PROPERTIES (ERC-721 test tokens) the pool owns, banked by lanes at wrap-up (Tim 2026-09-03). Instant and local: returns the pool meter's snapshot (refreshed every 5 min; holdings tailed from on-chain transfer events, so the count is exact however large). Page through token ids with limit/offset; set with_metadata to fetch name/address/acres/value/loan state for the page (one single-token query each, max 20) so you can pick a property that fits, then request it with wallet_dispense(token_contract, token_id).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Page size for token ids (default 20, max 20 when with_metadata)." },
+          offset: { type: "number", description: "Page offset into the sorted token id list (default 0)." },
+          with_metadata: { type: "boolean", description: "Fetch per-token metadata for the page from the staging property index (default false)." },
+        },
+      },
+    },
+    {
       name: "wallet_dispense",
       description:
         "Fund a wallet with testnet SepoliaETH + USDC from the shared custodian pool (WALLET_DISPENSE, supersedes the dead Circle faucet_usdc). The wallet-vault service is the sole pool custodian: it signs+broadcasts TWO nonce-sequenced txs (ETH then USDC) to your address and posts the two tx hashes back as a 'wallet.dispense.result' event on your Wire channel (this tool returns immediately after dispatch — read your channel for the hashes). No metering. Sepolia only for now (11155111). Use to fund fresh agent EOAs/smart-accounts for marketplace + onboarding tests.",
@@ -527,6 +540,35 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
 
+    case "wallet_pool_inventory": {
+      const { readFileSync, statSync } = await import("fs");
+      const file = process.env.WALLET_POOL_METER_FILE?.trim() || "/tmp/pool-usage.json";
+      let snap: any;
+      try { snap = JSON.parse(readFileSync(file, "utf8")); }
+      catch (e) { return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: `pool meter snapshot unreadable at ${file}: ${String(e)} — the com.agiterra.pool-usage job publishes it every 5 min` }) }] }; }
+      const ageS = Math.round((Date.now() - statSync(file).mtimeMs) / 1000);
+      const props = snap.properties || {};
+      const ids: string[] = Array.isArray(props.token_ids) ? props.token_ids : [];
+      const withMeta = args.with_metadata === true;
+      const limit = Math.max(1, Math.min(Number(args.limit ?? 20) || 20, withMeta ? 20 : 200));
+      const offset = Math.max(0, Number(args.offset ?? 0) || 0);
+      const page = ids.slice(offset, offset + limit);
+      let items: unknown[] = page.map((id) => ({ token_id: id }));
+      if (withMeta && page.length) {
+        const url = process.env.PROPERTY_INDEX_URL?.trim() || "https://api-test.fabrica.land/graphql";
+        items = await Promise.all(page.map(async (id) => {
+          try {
+            const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: "query($n:String!,$c:String!,$t:String!){ token(network:$n, contractAddress:$c, tokenId:$t){ tokenId name street locality region countryCode acres estimatedValue propertyLink isPremint supplyUnderLoan supplyInDefault supplyLiquidating } }", variables: { n: props.network || "sepolia", c: props.contract, t: id } }) });
+            const j: any = await r.json(); const t = j?.data?.token;
+            return t ? { ...t, under_loan: !!(t.supplyUnderLoan && String(t.supplyUnderLoan) !== "0") } : { token_id: id, metadata: "not in index" };
+          } catch (e) { return { token_id: id, metadata_error: String(e).slice(0, 120) }; }
+        }));
+      }
+      const out = { ok: true, as_of: snap.as_of, snapshot_age_s: ageS, pool: snap.pool, eth: snap.eth, usdc: snap.usdc, flags: snap.flags || [],
+        properties: { status: props.status, contract: props.contract, network: props.network, count: props.count, last_block: props.last_block, error: props.error || null, offset, limit, items,
+          note: "the meter file lists the first 25 ids; the full ledger is /opt/agiterra/watch/state/pool-properties.json" } };
+      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+    }
     case "wallet_dispense": {
       const agentAddress = String(args.agent_address ?? "").trim();
       if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) throw new Error("agent_address must be a 0x-prefixed 20-byte hex address");
