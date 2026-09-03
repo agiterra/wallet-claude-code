@@ -351,7 +351,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "faucet_usdc",
       description: "RETIRED (2026-09-03): the Circle faucet is dead. Use wallet_dispense for testnet USDC/ETH from the shared custodian pool; wallet_pool_inventory shows what it holds.",
-        "Request testnet USDC from Circle's faucet API. Returns 20 USDC per address per chain per 2 hours (Circle's rate limit). Supports Sepolia (11155111), Base Sepolia (84532), Arbitrum Sepolia (421614), Optimism Sepolia (11155420), Polygon Amoy (80002), and Unichain Sepolia (1301). Requires CIRCLE_FAUCET_API_KEY env var (free from console.circle.com). Use this to fund agent-owned wallets for marketplace tests (e.g., the Fabrica Seaport buy flow).",
       inputSchema: {
         type: "object",
         properties: {
