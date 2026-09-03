@@ -370,6 +370,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           agent_address: { type: "string", description: "0x-prefixed 20-byte address to fund with ETH+USDC." },
           chain_id: { type: "number", description: "Target chain. Defaults to Sepolia (11155111)." },
+          assets: { type: "array", items: { type: "string", enum: ["eth", "usdc"] }, description: "Optional. Which legs to dispense (default both). Each leg is sent if the pool can afford it; a leg the pool cannot afford is reported in result.skipped rather than failing the whole request." },
+          token_contract: { type: "string", description: "Optional, with token_id: dispense a PROPERTY (ERC-721) from the shared pool instead of ETH+USDC — the pool custodies test property banked by lanes at wrap-up (Tim 2026-09-03). 0x-prefixed contract address." },
+          token_id: { type: "string", description: "Optional, with token_contract: decimal token id the pool owns. Result carries token_tx." },
         },
         required: ["agent_address"],
       },
@@ -530,7 +533,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const chainId = args.chain_id != null ? Number(args.chain_id) : 11155111;
       if (!Number.isFinite(chainId)) throw new Error("chain_id must be a number");
       const requestId = crypto.randomUUID();
-      const { seq } = await publishDirected("wallet.dispense.request", { request_id: requestId, agent_address: agentAddress, chain_id: chainId }, WALLET_DISPENSE_DEST);
+      const assets = Array.isArray(args.assets) ? (args.assets as unknown[]).map(String) : undefined;
+      const token = args.token_contract && args.token_id != null ? { contract: String(args.token_contract), token_id: String(args.token_id) } : undefined;
+      const { seq } = await publishDirected("wallet.dispense.request", { request_id: requestId, agent_address: agentAddress, chain_id: chainId, ...(assets ? { assets } : {}), ...(token ? { token } : {}) }, WALLET_DISPENSE_DEST);
       return {
         content: [{
           type: "text",
