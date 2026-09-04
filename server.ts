@@ -237,6 +237,21 @@ function destFromArgs(args: Record<string, unknown>): string {
   return typeof v === "string" && v.trim() ? v.trim() : WALLET_VAULT_DEST;
 }
 
+
+// Which instance did this call talk to, and does the caller ALSO have a per-lane instance? During the
+// 2026-09-04 4100 outage a lane created three wallets on the shared vault without vault_id while its
+// provisioned wallet lived on wallet-vault-<lane>, and could not tell which instance it was on — 25 min
+// of diagnosis (Brioche 601018, tortelli postmortem). Every list/create answer now names the instance.
+async function vaultContext(dest: string, callerAgentId: string): Promise<{ vault: string; per_lane_vault?: string; note?: string }> {
+  const perLane = `wallet-vault-${callerAgentId}`;
+  let hasPerLane = false;
+  try { hasPerLane = Object.keys(await readDirectory(perLane)).length > 0; } catch { hasPerLane = false; }
+  const out: { vault: string; per_lane_vault?: string; note?: string } = { vault: dest };
+  if (hasPerLane) out.per_lane_vault = perLane;
+  if (hasPerLane && dest === WALLET_VAULT_DEST) out.note = `You also have a per-lane extension instance '${perLane}' (browser/dApp signing via wallet_use). '${dest}' is the shared vault: agent-direct signing (wallet_send) and the dispense pool. Pass vault_id to choose.`;
+  return out;
+}
+
 // ----- MCP server -----
 
 // ----- Faucet helper (Circle testnet) -----
@@ -650,10 +665,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           if (before[addr]) continue;
           if (meta.creator !== callerAgentId) continue;
           if (meta.name !== walletName) continue;
+          const ctx = await vaultContext(dest, callerAgentId);
           return {
             content: [{
               type: "text",
-              text: `Created wallet '${walletName}' at ${addr} (chain ${meta.chain_id}, creator=${callerAgentId}, access=specific:[${callerAgentId}]).`,
+              text: `Created wallet '${walletName}' at ${addr} on vault '${dest}' (chain ${meta.chain_id}, creator=${callerAgentId}, access=specific:[${callerAgentId}]).${ctx.note ? ` NOTE: ${ctx.note}` : ""}`,
             }],
           };
         }
@@ -674,12 +690,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         creator: meta.creator,
         access_mode: meta.access.mode,
       }));
+      const ctx = await vaultContext(destFromArgs(args), callerAgentId);
       return {
         content: [{
           type: "text",
-          text: rows.length === 0
-            ? `(no wallets — ${callerAgentId} isn't in any access list and no wallets are mode:'all'.)`
-            : JSON.stringify(rows, null, 2),
+          text: JSON.stringify({ ...ctx, wallets: rows, ...(rows.length === 0 ? { hint: `no wallets on '${ctx.vault}' — ${callerAgentId} isn't in any access list there and none are mode:'all'${ctx.per_lane_vault ? `; try vault_id='${ctx.per_lane_vault}'` : ""}.` } : {}) }, null, 2),
         }],
       };
     }
