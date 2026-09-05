@@ -598,7 +598,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           } catch (e) { return { token_id: id, metadata_error: String(e).slice(0, 120) }; }
         }));
       }
-      const out = { ok: true, as_of: snap.as_of, snapshot_age_s: ageS, pool: snap.pool, eth: snap.eth, usdc: snap.usdc, flags: snap.flags || [],
+      // Explicit freshness so a lane can tell fresh from stale without doing arithmetic (Brioche 603603:
+      // the meter had died and served an 8064 s snapshot). Stale = older than 2x the 5-min meter interval.
+      const STALE_S = Number(process.env.WALLET_POOL_STALE_S ?? 600);
+      const fresh = ageS <= STALE_S;
+      const out = { ok: true, fresh, stale: !fresh, stale_warning: fresh ? undefined : `pool snapshot is ${ageS}s old (> ${STALE_S}s) — the meter may be wedged; verify pool state from receipts + on-chain balanceOf before acting`, as_of: snap.as_of, snapshot_age_s: ageS, pool: snap.pool, eth: snap.eth, usdc: snap.usdc, flags: snap.flags || [],
         properties: { status: props.status, contract: props.contract, network: props.network, count: props.count, last_block: props.last_block, error: props.error || null, offset, limit, items,
           note: "the meter file lists the first 25 ids; the full ledger is /opt/agiterra/watch/state/pool-properties.json" } };
       return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
