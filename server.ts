@@ -404,6 +404,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "wallet_deploy",
+      description:
+        "Deploy a contract from a VAULT-custodied wallet (CREATE tx signed by the wallet-vault service). Give the creation bytecode as a FILE (raw hex or a Foundry artifact JSON — .bytecode.object) plus, if the constructor takes arguments, their ABI encoding from `cast abi-encode 'constructor(...)' ...`; the tool appends args to bytecode, checks hex/size (EIP-3860 ≤ 49152 bytes), and reports bytecode_bytes / args_bytes / sha256(init_code) BEFORE anything is signed — cross-check them against cast. Results arrive as two wallet.deploy.result events on your Wire channel: phase 'accepted' (pinned nonce + predicted_address, within seconds) then 'mined' (contract_address, status, gas_used) — or 'pending'/'failed'. Every attempt, status 0 included, is in the vault's deploy ledger; the result names repo_record_path (broadcast/wallet-vault/<chain_id>/<label>.json) — write the mined record there.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          wallet_address: { type: "string", description: "0x-prefixed 20-byte address of a vault wallet you may use (deployer)." },
+          bytecode_file: { type: "string", description: "Path (readable by you) to the creation bytecode: raw hex (0x-prefixed or not) or a Foundry artifact JSON (out/<C>.sol/<C>.json)." },
+          constructor_args_hex: { type: "string", description: "Optional. ABI-encoded constructor args, 0x hex — e.g. $(cast abi-encode 'constructor(address,uint256)' 0x.. 42). Appended to the bytecode verbatim." },
+          label: { type: "string", description: "REQUIRED. Short name for the ledger + repo record, e.g. 'ImmutableAggregator round-2' (≤80 chars, [A-Za-z0-9 ._-])." },
+          value: { type: "string", description: "Optional wei as 0x hex, for payable constructors." },
+          gas: { type: "string", description: "Optional gas limit override, 0x hex (default: estimateGas)." },
+          chain_id: { type: "number", description: "Target chain. Defaults to Sepolia (11155111)." },
+        },
+        required: ["wallet_address", "bytecode_file", "label"],
+      },
+    },
+    {
       name: "wallet_dispense",
       description:
         "Fund a wallet with testnet SepoliaETH + USDC from the shared custodian pool (WALLET_DISPENSE, supersedes the dead Circle faucet_usdc). The wallet-vault service is the sole pool custodian: it signs+broadcasts TWO nonce-sequenced txs (ETH then USDC) to your address and posts the two tx hashes back as a 'wallet.dispense.result' event on your Wire channel (this tool returns immediately after dispatch — read your channel for the hashes). No metering. Sepolia only for now (11155111). Use to fund fresh agent EOAs/smart-accounts for marketplace + onboarding tests.",
@@ -616,6 +634,60 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const requestId = crypto.randomUUID();
       const { seq } = await publishDirected("wallet.sign.request", { request_id: requestId, wallet_address: walletAddress, method, params, chain_id: chainId }, WALLET_VAULT_DEST);
       return { content: [{ type: "text", text: `Sign request ${requestId} dispatched (seq ${seq}) for ${walletAddress} on chain ${chainId}: ${method}. The wallet-vault service authorizes against the wallet's access list, signs with the vault key, broadcasts if it is a transaction, and posts a 'wallet.sign.result' channel event to you with { result: <txHash|signature> } or { error }. Read your channel for it.` }] };
+    }
+    case "wallet_deploy": {
+      const walletAddress = String(args.wallet_address ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) throw new Error("wallet_address must be a 0x-prefixed 20-byte hex address");
+      const label = String(args.label ?? "").trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(label)) throw new Error("label is required: 1–80 chars of [A-Za-z0-9 ._-], starting alphanumeric");
+      const file = String(args.bytecode_file ?? "").trim();
+      if (!file) throw new Error("bytecode_file required");
+      const { readFileSync } = await import("fs");
+      const { createHash } = await import("crypto");
+      let raw: string;
+      try { raw = readFileSync(file, "utf8"); } catch (e) { throw new Error(`cannot read bytecode_file ${file}: ${(e as Error).message}`); }
+      let bytecode = raw.trim();
+      if (bytecode.startsWith("{")) {
+        // Foundry artifact: { bytecode: { object: "0x..." } } (also accept { bytecode: "0x..." } / { object: "0x..." })
+        let art: Record<string, unknown>;
+        try { art = JSON.parse(bytecode) as Record<string, unknown>; } catch { throw new Error(`${file} looks like JSON but does not parse`); }
+        const bc = art.bytecode as Record<string, unknown> | string | undefined;
+        const obj = typeof bc === "string" ? bc : (bc && typeof bc.object === "string" ? bc.object : (typeof art.object === "string" ? art.object : undefined));
+        if (!obj) throw new Error(`${file}: no .bytecode.object (Foundry artifact) found`);
+        bytecode = String(obj).trim();
+      }
+      if (!bytecode.startsWith("0x")) bytecode = "0x" + bytecode;
+      if (!/^0x(?:[0-9a-fA-F]{2})+$/.test(bytecode)) throw new Error(`${file}: creation bytecode is not even-length hex (unlinked library placeholders like __$...$__ must be resolved first)`);
+      let argsHex = String(args.constructor_args_hex ?? "").trim();
+      if (argsHex) {
+        if (!argsHex.startsWith("0x")) argsHex = "0x" + argsHex;
+        if (!/^0x(?:[0-9a-fA-F]{2})*$/.test(argsHex)) throw new Error("constructor_args_hex must be even-length 0x hex (use `cast abi-encode 'constructor(...)' ...`)");
+        if ((argsHex.length - 2) % 64 !== 0) throw new Error(`constructor_args_hex is ${(argsHex.length - 2) / 2} bytes — ABI-encoded constructor args are a multiple of 32 bytes; do not hand-trim or hand-pad`);
+      }
+      const initCode = (bytecode + (argsHex ? argsHex.slice(2) : "")).toLowerCase();
+      const bytecodeBytes = (bytecode.length - 2) / 2; const argsBytes = argsHex ? (argsHex.length - 2) / 2 : 0; const initBytes = bytecodeBytes + argsBytes;
+      if (initBytes > 49152) throw new Error(`init code is ${initBytes} bytes; EIP-3860 caps it at 49152`);
+      const initSha = createHash("sha256").update(Buffer.from(initCode.slice(2), "hex")).digest("hex");
+      const chainId = typeof args.chain_id === "number" ? args.chain_id : 11155111;
+      const value = args.value != null ? String(args.value).trim() : undefined;
+      if (value !== undefined && !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error("value must be 0x hex wei");
+      const gas = args.gas != null ? String(args.gas).trim() : undefined;
+      if (gas !== undefined && !/^0x[0-9a-fA-F]+$/.test(gas)) throw new Error("gas must be 0x hex");
+      const requestId = crypto.randomUUID();
+      const { seq } = await publishDirected("wallet.deploy.request", {
+        request_id: requestId, wallet_address: walletAddress, chain_id: chainId, init_code: initCode, label,
+        bytecode_bytes: bytecodeBytes, args_bytes: argsBytes, ...(value ? { value } : {}), ...(gas ? { gas } : {}),
+      }, WALLET_VAULT_DEST);
+      const slug = label.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "deploy";
+      return {
+        content: [{
+          type: "text",
+          text: `Deploy request ${requestId} dispatched (seq ${seq}): deployer ${walletAddress} on chain ${chainId}, label '${label}'.\n` +
+            `init code = ${initBytes} bytes (bytecode ${bytecodeBytes} + constructor args ${argsBytes}); sha256(init_code) ${initSha}. Cross-check: \`cast\` byte counts must match BEFORE you trust the result.\n` +
+            `Watch your Wire channel for wallet.deploy.result request_id ${requestId}: phase 'accepted' (pinned nonce + predicted_address — you may pre-write it, and must fail loudly if the mined address differs), then 'mined' (contract_address, status, gas_used, block) or 'pending' (no receipt in 90 s; tx_hash given) or 'failed' (error). ` +
+            `Write the mined record verbatim to broadcast/wallet-vault/${chainId}/${slug}.json in the repo you deploy from; the vault keeps its own ledger line.`,
+        }],
+      };
     }
     case "wallet_dispense": {
       const agentAddress = String(args.agent_address ?? "").trim();
