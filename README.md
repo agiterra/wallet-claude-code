@@ -81,3 +81,57 @@ Sign requests arrive via the `wallet.sign.request` Wire channel. Read the reques
 ## License
 
 MIT.
+
+## Two traps every browser-driven lane hits
+
+Both found the hard way by `eng-3586-transfer` on ENG-3586 (2026-09-22), each costing a run.
+
+### 1. `wallet_send` reaches the SHARED vault only
+
+`wallet_send` has no `vault_id` and always dispatches to `wallet-vault`. A wallet created in a
+**per-lane** vault (`wallet_create`/`wallet_list` with `vault_id: 'wallet-vault-<lane>'`) is
+invisible to it and fails:
+
+```
+{"source":"wallet-vault","topic":"wallet.sign.result",
+ "payload":{"error":{"code":4100,"message":"no wallet 0x… in this vault's directory"}}}
+```
+
+⚠️ **Read the `source`, not just the error.** It says `wallet-vault`, not
+`wallet-vault-<lane>` — that is how you know it was routed to the default vault rather than that
+your wallet is missing.
+
+The two vaults are different machines, not two copies of one:
+
+| vault | signs how | reach it with |
+|---|---|---|
+| `wallet-vault` (shared) | service-side, autonomous | `wallet_send`, `wallet_deploy` |
+| `wallet-vault-<lane>` (per-lane) | browser/extension, needs approval | `wallet_use` + `window.ethereum` + `wallet_approve` |
+
+So for a per-lane wallet, drive it through the page:
+`wallet_use(tab_id, wallet, vault_id)` → `window.ethereum.request(...)` → `wallet_approve(request_id, vault_id)`.
+
+### 2. The browser request must be fired NON-BLOCKING
+
+`await window.ethereum.request(...)` inside a single `browser_evaluate` **blocks the tool call**,
+so you cannot call `wallet_approve` until it returns — and it never returns, because it is waiting
+for the approval you are unable to send:
+
+```
+Decider error: WireDecider timeout after 60000ms (no wallet.sign.response for …)   (code -32603)
+```
+
+⇒ Dispatch, return immediately, approve, then read the result in a **second** evaluate:
+
+```js
+// evaluate #1 — returns at once
+window.__r = { pending: true };
+window.ethereum.request({ method: 'eth_sendTransaction', params: [{ to, value }] })
+  .then(v => window.__r = { value: v }).catch(e => window.__r = { error: String(e) });
+return 'dispatched';
+```
+
+then `wallet_approve(request_id, vault_id)`, then evaluate #2 reading `window.__r`.
+
+★ The deadlock is structural, not a timing fluke: **the approval and the request cannot share one
+synchronous tool call**, because the tool call is the thing that would carry the approval.
