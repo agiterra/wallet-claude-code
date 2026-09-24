@@ -432,6 +432,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           agent_address: { type: "string", description: "0x-prefixed 20-byte address to fund with ETH+USDC." },
           chain_id: { type: "number", description: "Target chain. Defaults to Sepolia (11155111)." },
           assets: { type: "array", items: { type: "string", enum: ["eth", "usdc"] }, description: "Optional. Which legs to dispense (default both). Each leg is sent if the pool can afford it; a leg the pool cannot afford is reported in result.skipped rather than failing the whole request." },
+          usdc_amount: { type: "string", description: "Optional. Draw LESS USDC than the standard drip (20 USDC): a decimal like \"5\" or \"2.5\", > 0 and <= 20. Take only what your FV needs — the pool is shared and refills by hand. Out of range → refused with an error, nothing sent." },
           token_contract: { type: "string", description: "Optional, with token_id: dispense a PROPERTY (ERC-721) from the shared pool instead of ETH+USDC — the pool custodies test property banked by lanes at wrap-up (Tim 2026-09-03). 0x-prefixed contract address." },
           token_id: { type: "string", description: "Optional, with token_contract: decimal token id the pool owns. Result carries token_tx." },
         },
@@ -698,7 +699,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const requestId = crypto.randomUUID();
       const assets = Array.isArray(args.assets) ? (args.assets as unknown[]).map(String) : undefined;
       const token = args.token_contract && args.token_id != null ? { contract: String(args.token_contract), token_id: String(args.token_id) } : undefined;
-      const { seq } = await publishDirected("wallet.dispense.request", { request_id: requestId, agent_address: agentAddress, chain_id: chainId, ...(assets ? { assets } : {}), ...(token ? { token } : {}) }, WALLET_DISPENSE_DEST);
+      // Validated again (and capped) by the service; checked here too so a typo fails before a Wire round trip.
+      const usdcAmount = args.usdc_amount != null ? String(args.usdc_amount).trim() : undefined;
+      if (usdcAmount !== undefined && !/^\d{1,9}(\.\d{1,6})?$/.test(usdcAmount)) throw new Error("usdc_amount must be a positive decimal with at most 6 places, e.g. \"5\" or \"2.5\"");
+      const { seq } = await publishDirected("wallet.dispense.request", { request_id: requestId, agent_address: agentAddress, chain_id: chainId, ...(assets ? { assets } : {}), ...(usdcAmount ? { usdc_amount: usdcAmount } : {}), ...(token ? { token } : {}) }, WALLET_DISPENSE_DEST);
       return {
         content: [{
           type: "text",
