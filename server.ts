@@ -464,7 +464,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "wallet_use",
       description:
-        "Bind a wallet to a browser tab and AWAIT the vault's explicit claim outcome — errors loudly on refusal (no access, unknown wallet, wallet not signable by that vault instance) or 15s timeout. Subsequent EIP-1193 sign requests originating in that tab route to the calling agent for approval. `tab_id` must be the REAL chrome.tabs tab id: get it from the page itself via window.ethereum.request({method:'agiterra_getTabId'}) (works under any driver, incl. playwright-mcp browser_evaluate — a Playwright page INDEX is NOT a tab id), or from Chrome MCP's tab list. The wallet may be referenced by name (case-insensitive) or 0x-address.",
+        "Bind a wallet to a browser tab and AWAIT the vault's explicit claim outcome — errors loudly on refusal (no access, unknown wallet, wallet not signable by that vault instance) or 15s timeout. ⛔ The wallet must live on the SAME instance as the tab: a lane's browser tabs belong to its per-lane instance 'wallet-vault-<lane>', so a SHARED-vault ('wallet-vault') wallet cannot be bound there (the claim times out). Move the assets to a per-lane wallet with wallet_send first.Subsequent EIP-1193 sign requests originating in that tab route to the calling agent for approval. `tab_id` must be the REAL chrome.tabs tab id: get it from the page itself via window.ethereum.request({method:'agiterra_getTabId'}) (works under any driver, incl. playwright-mcp browser_evaluate — a Playwright page INDEX is NOT a tab id), or from Chrome MCP's tab list. The wallet may be referenced by name (case-insensitive) or 0x-address.",
       inputSchema: {
         type: "object",
         properties: {
@@ -823,8 +823,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           }],
         };
       }
+      // A tab belongs to the extension instance running in the caller's browser. A lane with a per-lane
+      // instance (wallet-vault-<lane>) that claims one of its tabs for a SHARED-vault wallet sends the claim to
+      // an extension that does not own that tab, so no ack ever comes (fvs2-4511, Baguette 655122, 2026-10-03:
+      // two 15 s timeouts read as 'extension predates v0.5.0'). Name that cause first when it applies.
+      const ctx = await vaultContext(dest, callerAgentId).catch(() => null);
+      const crossVault = ctx?.per_lane_vault && ctx.per_lane_vault !== dest
+        ? `Most likely cause: tab ${tabId} belongs to YOUR extension instance '${ctx.per_lane_vault}', but wallet ${found.address} lives on '${dest}', whose extension does not own that tab. A wallet can only be bound to a tab of the instance that holds it. Options: sign agent-direct with wallet_send (shared vault), or move the assets to a wallet on '${ctx.per_lane_vault}' (wallet_send to its address) and call wallet_use with vault_id='${ctx.per_lane_vault}'. `
+        : "";
       throw new Error(
-        `tab_claim published (seq ${seq}) but no ack within 15s. Either the vault extension predates v0.5.0 (no claim-ack support), or it isn't connected to Wire, or the claim was dropped. Verify in-page with window.ethereum.request({method:'eth_accounts'}).`,
+        `tab_claim published (seq ${seq}) to vault '${dest}' but no ack within 15s. ${crossVault}${crossVault ? "Other possible causes: " : "Either "}the vault extension predates v0.5.0 (no claim-ack support), or it isn't connected to Wire, or the claim was dropped. Verify in-page with window.ethereum.request({method:'eth_accounts'}).`,
       );
     }
     case "wallet_release": {
