@@ -5,7 +5,7 @@
     "": {
       "name": "@agiterra/wallet-claude-code",
       "dependencies": {
-        "@agiterra/mcp-tee": "agiterra/mcp-tee#v0.1.0",
+        "@agiterra/mcp-tee": "agiterra/mcp-tee#v0.3.0",
         "@agiterra/wallet-tools": "agiterra/wallet-tools#v0.3.1",
         "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5",
         "@modelcontextprotocol/sdk": "^1.0.0",
@@ -16,7 +16,7 @@
     },
   },
   "packages": {
-    "@agiterra/mcp-tee": ["@agiterra/mcp-tee@github:agiterra/mcp-tee#ecdf634", { "bin": { "mcp-tee": "./bin/mcp-tee.sh" } }, "agiterra-mcp-tee-ecdf634", "sha512-JWjvscg2DDNrBidXKPTveVQQmTI2iWC3KnsexKy45ZiahQNyo0tbQXkCn/r1FQrt4OPO9na8capDbc7GdF/bRw=="],
+    "@agiterra/mcp-tee": ["@agiterra/mcp-tee@github:agiterra/mcp-tee#4cec508", { "bin": { "mcp-tee": "./bin/mcp-tee.sh" } }, "agiterra-mcp-tee-4cec508", "sha512-OmLl0eVP5M/fOx0FUPhLiN2E8vr8Rue8hVd/VjkTY/W94XQSJXP3CAdlr5qpIXlWT/0t7DgIA2ghEZkROqYhWA=="],
 
     "@agiterra/wallet-tools": ["@agiterra/wallet-tools@github:agiterra/wallet-tools#beca5ad", { "dependencies": { "@agiterra/wire-tools": "agiterra/wire-tools#v2.3.5", "@noble/curves": "^1.6.0", "@noble/hashes": "^1.5.0" } }, "agiterra-wallet-tools-beca5ad", "sha512-MI/vtrmXpxuYvmmwP0/ciILRnmwnjTs0nV4c462XgaB9InYU8ATvrdp79HzfzKEjXiOC8m9qHfMKInmxhQpAVQ=="],
 
@@ -241,8 +241,6 @@
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
-
-    "@agiterra/wallet-tools/@agiterra/wire-tools": ["@agiterra/wire-tools@github:agiterra/wire-tools#1f5ff65", { "dependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "pino": "^10.3.1" } }, "agiterra-wire-tools-1f5ff65", "sha512-0bLptUllC3Zj5YX+RzXSRvRz8IdFSJpjGVaurAxvCrUJ2csinqevMqR7Zej8IjBzTLBirZYtCIxGih2DKXPbcw=="],
 
     "thread-stream/real-require": ["real-require@1.0.0", "", {}, "sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g=="],
 
