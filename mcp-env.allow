@@ -1,0 +1,10 @@
+# mcp-tee env allowlist — wallet plugin (wallet 0.10.0 + @agiterra/wallet-tools v0.3.1 + wire-tools v2.3.5).
+# Base set (PATH HOME USER LOGNAME SHELL LANG LC_* TERM TMPDIR TZ) is implicit.
+# ENG-5158. Built from a static read of server.ts + node_modules/@agiterra/*
+# (tests excluded) on 2026-10-20. wallet-tools reads no env; server.ts imports only
+# wire-tools/crypto. The server spawns no subprocesses.
+AGENT_*                  # AGENT_ID AGENT_PRIVATE_KEY (signing, JWT auth)
+WIRE_*                   # WIRE_URL; WIRE_DASHBOARD_TOKEN (operator-gated grant/revoke/set_access_mode)
+WALLET_*                 # WALLET_VAULT_SERVICE_ID WALLET_POOL_METER_FILE WALLET_POOL_STALE_S
+CIRCLE_FAUCET_API_KEY    # faucet_usdc
+PROPERTY_INDEX_URL       # wallet_pool_inventory GraphQL endpoint
