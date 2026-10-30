@@ -378,7 +378,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "wallet_pool_inventory",
       description:
-        "Read what the shared custodian pool can dispense: SepoliaETH and USDC balances plus the PROPERTIES (ERC-721 test tokens) the pool owns, banked by lanes at wrap-up (Tim 2026-09-03). Instant and local: returns the pool meter's snapshot (refreshed every 5 min; holdings tailed from on-chain transfer events, so the count is exact however large). Page through token ids with limit/offset; set with_metadata to fetch name/address/acres/value/loan state for the page (one single-token query each, max 20) so you can pick a property that fits, then request it with wallet_dispense(token_contract, token_id).",
+        "Read what the shared custodian pool can dispense: SepoliaETH and USDC balances plus the PROPERTIES (ERC-721 test tokens) the pool owns, banked by lanes at wrap-up (Tim 2026-09-03). Instant and local: returns the pool meter's snapshot (refreshed every 5 min; holdings tailed from on-chain transfer events, so the count is exact however large). Page through token ids with limit/offset; set with_metadata to fetch name/address/acres/value/loan state for the page (one single-token query each, max 20) so you can pick a property that fits, then request it with wallet_dispense(token_contract, token_id). IN A LANE POD: run `pool-snapshot` (pod-tools) first; a pod has its own /tmp, and that command copies the host's snapshot in.",
       inputSchema: {
         type: "object",
         properties: {
@@ -600,7 +600,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const file = process.env.WALLET_POOL_METER_FILE?.trim() || "/tmp/pool-usage.json";
       let snap: any;
       try { snap = JSON.parse(readFileSync(file, "utf8")); }
-      catch (e) { return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: `pool meter snapshot unreadable at ${file}: ${String(e)} — the com.agiterra.pool-usage job publishes it every 5 min` }) }] }; }
+      catch (e) { return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: `pool meter snapshot unreadable at ${file}: ${String(e)} — the com.agiterra.pool-usage job publishes it every 5 min on the HOST. In a lane pod, run pool-snapshot (pod-tools) first: it copies the host snapshot into this pod's /tmp; then call this tool again` }) }] }; }
       const ageS = Math.round((Date.now() - statSync(file).mtimeMs) / 1000);
       const props = snap.properties || {};
       const ids: string[] = Array.isArray(props.token_ids) ? props.token_ids : [];
@@ -623,7 +623,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       // the meter had died and served an 8064 s snapshot). Stale = older than 2x the 5-min meter interval.
       const STALE_S = Number(process.env.WALLET_POOL_STALE_S ?? 600);
       const fresh = ageS <= STALE_S;
-      const out = { ok: true, fresh, stale: !fresh, stale_warning: fresh ? undefined : `pool snapshot is ${ageS}s old (> ${STALE_S}s) — the meter may be wedged; verify pool state from receipts + on-chain balanceOf before acting`, as_of: snap.as_of, snapshot_age_s: ageS, pool: snap.pool, eth: snap.eth, usdc: snap.usdc, flags: snap.flags || [],
+      const out = { ok: true, fresh, stale: !fresh, stale_warning: fresh ? undefined : `pool snapshot is ${ageS}s old (> ${STALE_S}s) — in a lane pod, run pool-snapshot again; on the host the meter may be wedged; verify pool state from receipts + on-chain balanceOf before acting`, as_of: snap.as_of, snapshot_age_s: ageS, pool: snap.pool, eth: snap.eth, usdc: snap.usdc, flags: snap.flags || [],
         properties: { status: props.status, contract: props.contract, network: props.network, count: props.count, last_block: props.last_block, error: props.error || null, offset, limit, items,
           note: "the meter file lists the first 25 ids; the full ledger is /opt/agiterra/watch/state/pool-properties.json" } };
       return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
